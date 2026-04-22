@@ -1,0 +1,1394 @@
+import unittest
+from contextlib import redirect_stderr
+from io import StringIO
+import sys
+import tempfile
+from unittest import mock
+from pathlib import Path
+from urllib.error import URLError
+
+from scripts import bootstrap_wiki as bw
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SYDNEY_ROOT = ROOT / "raw" / "Apple Notes" / "Marcus" / "Areas" / "Sydney"
+
+
+def load_source(name: str) -> bw.SourceRecord:
+    path = SYDNEY_ROOT / name
+    content = path.read_text(encoding="utf-8", errors="ignore")
+    return bw.prepare_source_record(
+        source_label=bw.derive_note_title(path, content),
+        source_path="../" + path.relative_to(ROOT).as_posix(),
+        source_status="local_only",
+        raw_content=content,
+        fetched_summary=None,
+        detected_url=bw.extract_first_url(content),
+    )
+
+
+class BootstrapWikiTests(unittest.TestCase):
+    def test_bucket_scoring_recipe_like_page_crosses_threshold(self) -> None:
+        sources = [
+            bw.SourceRecord(
+                label="Pesto Eggs",
+                path="../raw/pesto-eggs.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Recipe note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Vodka Pasta",
+                path="../raw/vodka-pasta.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Recipe note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Miso Salmon",
+                path="../raw/miso-salmon.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Recipe note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+        ]
+        page = bw.Page(
+            slug="recipe",
+            title="Recipe",
+            page_type="Concepts",
+            summary_hint="Recipe",
+            sources={source.path: source for source in sources},
+        )
+        page.rendered_notes_markdown = "\n".join(
+            [
+                "### Breakfast",
+                "- Pesto eggs",
+                "### Dinner",
+                "- Vodka pasta",
+            ]
+        )
+
+        result = bw.score_bucket_signals(page)
+
+        self.assertTrue(result.is_bucket_signaled)
+        self.assertIn("generic-parent-slug", result.reasons)
+        self.assertIn("multi-cluster-notes", result.reasons)
+        self.assertIn("heterogeneous-sources", result.reasons)
+
+    def test_bucket_scoring_uci_like_page_crosses_threshold(self) -> None:
+        sources = [
+            bw.SourceRecord(
+                label="ICS 33",
+                path="../raw/ics-33.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Course note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="UCI Food",
+                path="../raw/uci-food.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Food note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="ARC Gym",
+                path="../raw/arc-gym.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Gym note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+        ]
+        page = bw.Page(
+            slug="uci",
+            title="UCI",
+            page_type="Entities",
+            summary_hint="UCI",
+            sources={source.path: source for source in sources},
+        )
+        page.connections["ics-33"] += 1
+        page.connections["uci-food"] += 1
+        page.connections["arc-gym"] += 1
+
+        result = bw.score_bucket_signals(page)
+
+        self.assertTrue(result.is_bucket_signaled)
+        self.assertIn("heterogeneous-sources", result.reasons)
+        self.assertIn("existing-satellites", result.reasons)
+
+    def test_bucket_scoring_atomic_page_with_subpoints_stays_below_threshold(self) -> None:
+        sources = [
+            bw.SourceRecord(
+                label="Moka Pot Tips",
+                path="../raw/moka-pot-a.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Brew ratio note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Moka Pot Cleaning",
+                path="../raw/moka-pot-b.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Cleaning note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+        ]
+        page = bw.Page(
+            slug="moka-pot",
+            title="Moka Pot",
+            page_type="Concepts",
+            summary_hint="Moka Pot",
+            sources={source.path: source for source in sources},
+        )
+        page.rendered_notes_markdown = "\n".join(
+            [
+                "### Brewing",
+                "- Lower heat helps.",
+                "### Cleaning",
+                "- Rinse only.",
+            ]
+        )
+
+        result = bw.score_bucket_signals(page)
+
+        self.assertFalse(result.is_bucket_signaled)
+        self.assertEqual(result.reasons, ["multi-cluster-notes"])
+
+    def test_bucket_scoring_lecture_page_remains_atomic(self) -> None:
+        sources = [
+            bw.SourceRecord(
+                label="ICS 33 Week 1",
+                path="../raw/ics33-week1.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Functions and recursion.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="ICS 33 Week 2",
+                path="../raw/ics33-week2.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Classes and iterators.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+        ]
+        page = bw.Page(
+            slug="ics-33",
+            title="ICS 33",
+            page_type="Concepts",
+            summary_hint="ICS 33",
+            sources={source.path: source for source in sources},
+        )
+        page.notes = ["Lecture notes on Python abstractions.", "Covered recursion and iterators."]
+
+        result = bw.score_bucket_signals(page)
+
+        self.assertFalse(result.is_bucket_signaled)
+        self.assertEqual(result.reasons, [])
+
+    def test_course_folder_name_is_not_treated_as_archive(self) -> None:
+        self.assertEqual(bw.clean_component("ICS 33"), "ics-33")
+
+    def test_bucket_scoring_structured_course_page_ignores_lecture_shape(self) -> None:
+        sources = [
+            bw.SourceRecord(
+                label="Week 1 Recursion",
+                path="../raw/Apple Notes/Marcus/Archives/ICS 33/week-1-recursion.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Lecture 1 covered recursion and tracing recursive calls.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Week 2 Iterators",
+                path="../raw/Apple Notes/Marcus/Archives/ICS 33/week-2-iterators.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Lecture 2 covered generators and iterators.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Midterm Review",
+                path="../raw/Apple Notes/Marcus/Archives/ICS 33/midterm-review.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Midterm review topics and practice questions.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+        ]
+        page = bw.Page(
+            slug="ics-33",
+            title="ICS 33",
+            page_type="Concepts",
+            summary_hint="ICS 33",
+            sources={source.path: source for source in sources},
+        )
+        page.rendered_notes_markdown = "\n".join(
+            [
+                "### Week 1",
+                "- Recursion and tracing calls.",
+                "### Week 2",
+                "- Iterators and generators.",
+                "### Midterm Review",
+                "- Practice prompts.",
+            ]
+        )
+
+        result = bw.score_bucket_signals(page)
+
+        self.assertFalse(result.is_bucket_signaled)
+        self.assertEqual(result.reasons, [])
+
+    def test_sydney_source_tagging_and_sensitive_filtering(self) -> None:
+        pin_source = load_source("Ebt pin is 9926.md")
+        gift_source = load_source("if u need a christmas idea i like this fruity floral pink prada triangle….md")
+        trip_source = load_source("YIPPEE TRIP TG.md")
+
+        self.assertIn("sensitive", pin_source.tags)
+        self.assertTrue(pin_source.excluded_from_body)
+
+        self.assertIn("gift_ideas", gift_source.tags)
+        self.assertFalse(gift_source.excluded_from_body)
+
+        self.assertTrue({"activities", "travel_plans", "places"} <= trip_source.tags)
+        self.assertFalse(trip_source.excluded_from_body)
+
+    def test_entity_prompt_excludes_sensitive_sources_and_biases_sections(self) -> None:
+        page = bw.Page(
+            slug="sydney",
+            title="Sydney",
+            page_type="Entities",
+            summary_hint="Sydney",
+            sources={},
+        )
+        safe_source = load_source("Sydney birthday July 20.md")
+        sensitive_source = load_source("Ebt pin is 9926.md")
+        page.sources[safe_source.path] = safe_source
+        page.sources[sensitive_source.path] = sensitive_source
+
+        prompt_blob = bw.serialize_sources_for_prompt(page)
+        messages = bw.build_synthesis_messages(page)
+        rendered = bw.render_page(page)
+
+        self.assertIn("Sydney birthday July 20", prompt_blob)
+        self.assertNotIn("Ebt pin is 9926", prompt_blob)
+        self.assertIn("### Key Dates", messages[1]["content"])
+        self.assertIn("must not be surfaced", messages[1]["content"])
+        self.assertIn("[Ebt pin is 9926]", rendered)
+
+    def test_single_source_structured_notes_preserve_lists(self) -> None:
+        source = bw.SourceRecord(
+            label="Things I Like",
+            path="../raw/example.md",
+            status="local_only",
+            raw_content="",
+            cleaned_text="## Gift Ideas\n\n- Rug making\n- Asian bakery",
+            fetched_summary=None,
+            detected_url=None,
+            tags={"gift_ideas"},
+            excluded_from_body=False,
+        )
+        page = bw.Page(
+            slug="example",
+            title="Example",
+            page_type="Concepts",
+            summary_hint="Example",
+            sources={source.path: source},
+        )
+
+        notes = bw.build_simple_notes_markdown(page)
+
+        self.assertIn("## Gift Ideas", notes)
+        self.assertIn("- Rug making", notes)
+        self.assertIn("- Asian bakery", notes)
+
+    def test_atomic_page_renderer_omits_boilerplate_and_keeps_real_sections(self) -> None:
+        source = bw.SourceRecord(
+            label="Example Source",
+            path="../raw/example.md",
+            status="local_only",
+            raw_content="",
+            cleaned_text="One concrete fact.",
+            fetched_summary=None,
+            detected_url=None,
+        )
+        page = bw.Page(
+            slug="example",
+            title="Example",
+            page_type="Concepts",
+            summary_hint="Example",
+            sources={source.path: source},
+        )
+        page.connections["related-page"] += 1
+
+        rendered = bw.render_page(page)
+
+        self.assertIn("# Example", rendered)
+        self.assertIn("## Notes", rendered)
+        self.assertIn("## Connections", rendered)
+        self.assertIn("## Sources", rendered)
+        self.assertNotIn("This page collects Marcus's notes", rendered)
+        self.assertNotIn("No notes yet", rendered)
+        self.assertNotIn("No sources linked yet", rendered)
+        self.assertNotIn("unclassified-media-captures", rendered)
+
+    def test_atomic_page_with_only_notes_and_link_omits_sources(self) -> None:
+        page = bw.Page(
+            slug="example",
+            title="Example",
+            page_type="Concepts",
+            summary_hint="Example",
+            notes=["One atomic note."],
+        )
+        page.connections["related-page"] += 1
+
+        rendered = bw.render_page(page)
+
+        self.assertIn("## Notes", rendered)
+        self.assertIn("## Connections", rendered)
+        self.assertNotIn("## Sources", rendered)
+
+    def test_topic_page_renders_only_title_and_connections(self) -> None:
+        page = bw.Page(
+            slug="travel-bags",
+            title="Travel Bags",
+            page_type="Concepts",
+            summary_hint="Travel Bags",
+            shape=bw.PAGE_SHAPE_TOPIC,
+        )
+        page.connections["backpack"] += 1
+        page.connections["duffel-bag"] += 1
+
+        rendered = bw.render_page(page)
+
+        self.assertEqual(
+            rendered,
+            "# Travel Bags\n\n## Connections\n\n- [[backpack]]\n- [[duffel-bag]]\n",
+        )
+
+    def test_single_source_page_stays_atomic_after_migration(self) -> None:
+        source = bw.SourceRecord(
+            label="Pocket Knife Review",
+            path="../raw/pocket-knife.md",
+            status="local_only",
+            raw_content="",
+            cleaned_text="Compact everyday carry knife.",
+            fetched_summary=None,
+            detected_url=None,
+        )
+        pages = {
+            "pocket-knife": bw.Page(
+                slug="pocket-knife",
+                title="Pocket Knife",
+                page_type="Concepts",
+                summary_hint="Pocket Knife",
+                sources={source.path: source},
+            )
+        }
+
+        bw.migrate_pages_to_atomic_topics(pages, {})
+        bw.ensure_meaningful_connections(pages)
+        bw.finalize_page_shapes(pages)
+
+        self.assertEqual(pages["pocket-knife"].shape, bw.PAGE_SHAPE_ATOMIC)
+
+    def test_three_satellites_convert_existing_slug_to_topic(self) -> None:
+        sources = [
+            bw.SourceRecord(
+                label="Backpack",
+                path="../raw/backpack.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Backpack note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Duffel Bag",
+                path="../raw/duffel.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Duffel note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Sling Bag",
+                path="../raw/sling.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Sling note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+        ]
+        page = bw.Page(
+            slug="travel-bags",
+            title="Travel Bags",
+            page_type="Concepts",
+            summary_hint="Travel Bags",
+            sources={source.path: source for source in sources},
+        )
+        existing = {
+            "travel-bags": bw.ParsedWikiPage(
+                slug="travel-bags",
+                title="Travel Bags",
+                page_type="Concepts",
+                shape=bw.PAGE_SHAPE_ATOMIC,
+            )
+        }
+
+        pages = {"travel-bags": page}
+        with mock.patch.object(bw, "split_preflight_check", return_value=(True, None)):
+            with mock.patch.object(
+                bw,
+                "analyze_page_for_atomic_split",
+                return_value=bw.PageSplitDecision(
+                    is_atomic=False,
+                    candidate_satellite_slugs=["backpack", "duffel-bag", "sling-bag"],
+                    source_assignments={
+                        "../raw/backpack.md": "backpack",
+                        "../raw/duffel.md": "duffel-bag",
+                        "../raw/sling.md": "sling-bag",
+                    },
+                ),
+            ):
+                bw.migrate_pages_to_atomic_topics(pages, existing, api_key="token")
+            bw.ensure_meaningful_connections(pages)
+            bw.finalize_page_shapes(pages)
+
+        self.assertEqual(pages["travel-bags"].shape, bw.PAGE_SHAPE_TOPIC)
+        self.assertIn("backpack", pages)
+        self.assertIn("duffel-bag", pages)
+        self.assertIn("sling-bag", pages)
+        self.assertEqual(pages["backpack"].topic_parent, "travel-bags")
+        self.assertIn("backpack", bw.sorted_connection_slugs(pages["travel-bags"]))
+
+    def test_mixed_umbrella_and_satellite_sources_convert_existing_slug_to_topic(self) -> None:
+        sources = [
+            bw.SourceRecord(
+                label="How to travel cheaply",
+                path="../raw/travel-cheaply.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Budget travel advice.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="My packing list (Japan)",
+                path="../raw/japan-packing.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Packing list.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="YIPPEE TRIP TG",
+                path="../raw/sf-trip.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Trip ideas for Santa Clara and San Francisco.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+        ]
+        pages = {
+            "travel": bw.Page(
+                slug="travel",
+                title="Travel",
+                page_type="Concepts",
+                summary_hint="Travel",
+                sources={source.path: source for source in sources},
+            )
+        }
+
+        with mock.patch.object(bw, "split_preflight_check", return_value=(True, None)):
+            with mock.patch.object(
+                bw,
+                "analyze_page_for_atomic_split",
+                return_value=bw.PageSplitDecision(
+                    is_atomic=False,
+                    candidate_satellite_slugs=["budget-travel", "packing-list", "santa-clara"],
+                    source_assignments={
+                        "../raw/travel-cheaply.md": "budget-travel",
+                        "../raw/japan-packing.md": "packing-list",
+                        "../raw/sf-trip.md": "santa-clara",
+                    },
+                ),
+            ):
+                bw.migrate_pages_to_atomic_topics(pages, {}, api_key="token")
+            bw.ensure_meaningful_connections(pages)
+            bw.finalize_page_shapes(pages)
+
+        self.assertEqual(pages["travel"].shape, bw.PAGE_SHAPE_TOPIC)
+        self.assertIn("budget-travel", pages)
+        self.assertIn("packing-list", pages)
+        self.assertIn("santa-clara", pages)
+        self.assertEqual(pages["budget-travel"].topic_parent, "travel")
+
+    def test_two_source_page_stays_atomic_when_llm_confirms_single_idea(self) -> None:
+        sources = [
+            bw.SourceRecord(
+                label="Backpack",
+                path="../raw/backpack.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Backpack note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Duffel Bag",
+                path="../raw/duffel.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Duffel note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+        ]
+        pages = {
+            "travel-bags": bw.Page(
+                slug="travel-bags",
+                title="Travel Bags",
+                page_type="Concepts",
+                summary_hint="Travel Bags",
+                sources={source.path: source for source in sources},
+            )
+        }
+
+        with mock.patch.object(bw, "split_preflight_check", return_value=(True, None)):
+            with mock.patch.object(
+                bw,
+                "analyze_page_for_atomic_split",
+                return_value=bw.PageSplitDecision(is_atomic=True),
+            ):
+                bw.migrate_pages_to_atomic_topics(pages, {}, api_key="token")
+            bw.ensure_meaningful_connections(pages)
+            bw.finalize_page_shapes(pages)
+
+        self.assertEqual(pages["travel-bags"].shape, bw.PAGE_SHAPE_ATOMIC)
+        self.assertNotIn("backpack", pages)
+
+    def test_split_preflight_failure_skips_immediately_and_reports_no_split(self) -> None:
+        sources = [
+            bw.SourceRecord(
+                label="Backpack",
+                path="../raw/backpack.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Backpack note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Duffel Bag",
+                path="../raw/duffel.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Duffel note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+        ]
+        pages = {
+            "travel-bags": bw.Page(
+                slug="travel-bags",
+                title="Travel Bags",
+                page_type="Concepts",
+                summary_hint="Travel Bags",
+                sources={source.path: source for source in sources},
+            )
+        }
+
+        with mock.patch.object(bw, "split_preflight_check", return_value=(False, "URLError: dns failed")):
+            with mock.patch.object(bw, "analyze_page_for_atomic_split") as analyze_mock:
+                stderr = StringIO()
+                with redirect_stderr(stderr):
+                    report = bw.migrate_pages_to_atomic_topics(pages, {}, api_key="token")
+
+        analyze_mock.assert_not_called()
+        self.assertEqual(report.mode, "no-split")
+        self.assertEqual(report.status, "skipped_preflight")
+        self.assertEqual(report.reason, "URLError: dns failed")
+        self.assertEqual(report.eligible_pages, 1)
+        self.assertIn("preflight failed", stderr.getvalue())
+
+    def test_split_exception_is_counted_and_surfaced(self) -> None:
+        sources = [
+            bw.SourceRecord(
+                label="Backpack",
+                path="../raw/backpack.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Backpack note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Duffel Bag",
+                path="../raw/duffel.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Duffel note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+        ]
+        pages = {
+            "travel-bags": bw.Page(
+                slug="travel-bags",
+                title="Travel Bags",
+                page_type="Concepts",
+                summary_hint="Travel Bags",
+                sources={source.path: source for source in sources},
+            )
+        }
+
+        with mock.patch.object(bw, "split_preflight_check", return_value=(True, None)):
+            with mock.patch.object(
+                bw,
+                "analyze_page_for_atomic_split",
+                side_effect=ValueError("bad JSON"),
+            ):
+                stderr = StringIO()
+                with redirect_stderr(stderr):
+                    report = bw.migrate_pages_to_atomic_topics(pages, {}, api_key="token")
+
+        self.assertEqual(report.status, "completed")
+        self.assertEqual(report.failed_pages, 1)
+        self.assertEqual(report.analyzed_pages, 0)
+        self.assertIn("ValueError: bad JSON", report.failure_details[0])
+        self.assertIn("failed 'travel-bags'", stderr.getvalue())
+
+    def test_non_atomic_page_with_insufficient_satellites_is_marked_incomplete(self) -> None:
+        sources = [
+            bw.SourceRecord(
+                label="Aphelios",
+                path="../raw/aphelios.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Champion note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Account note",
+                path="../raw/account-note.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Account note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+        ]
+        pages = {
+            "league-stuff": bw.Page(
+                slug="league-stuff",
+                title="League Stuff",
+                page_type="Concepts",
+                summary_hint="League Stuff",
+                sources={source.path: source for source in sources},
+            )
+        }
+
+        with mock.patch.object(bw, "split_preflight_check", return_value=(True, None)):
+            with mock.patch.object(
+                bw,
+                "analyze_page_for_atomic_split",
+                return_value=bw.PageSplitDecision(
+                    is_atomic=False,
+                    candidate_satellite_slugs=["aphelios"],
+                    source_assignments={"../raw/aphelios.md": "aphelios"},
+                ),
+            ):
+                stderr = StringIO()
+                with redirect_stderr(stderr):
+                    report = bw.migrate_pages_to_atomic_topics(pages, {}, api_key="token")
+
+        self.assertEqual(report.atomic_pages, 0)
+        self.assertEqual(report.incomplete_pages, 1)
+        self.assertEqual(report.incomplete_details, ["league-stuff: insufficient satellites"])
+        self.assertIn("incomplete (insufficient satellites)", stderr.getvalue())
+        self.assertEqual(pages["league-stuff"].shape, bw.PAGE_SHAPE_ATOMIC)
+
+    def test_non_atomic_page_with_incomplete_assignments_is_marked_incomplete(self) -> None:
+        sources = [
+            bw.SourceRecord(
+                label="Aphelios",
+                path="../raw/aphelios.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Champion note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Velkoz",
+                path="../raw/velkoz.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Champion note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Username",
+                path="../raw/username.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Account note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+        ]
+        pages = {
+            "league-stuff": bw.Page(
+                slug="league-stuff",
+                title="League Stuff",
+                page_type="Concepts",
+                summary_hint="League Stuff",
+                sources={source.path: source for source in sources},
+            )
+        }
+
+        with mock.patch.object(bw, "split_preflight_check", return_value=(True, None)):
+            with mock.patch.object(
+                bw,
+                "analyze_page_for_atomic_split",
+                return_value=bw.PageSplitDecision(
+                    is_atomic=False,
+                    candidate_satellite_slugs=["aphelios", "velkoz", "account-preferences"],
+                    source_assignments={
+                        "../raw/aphelios.md": "aphelios",
+                        "../raw/velkoz.md": "velkoz",
+                    },
+                ),
+            ):
+                stderr = StringIO()
+                with redirect_stderr(stderr):
+                    report = bw.migrate_pages_to_atomic_topics(pages, {}, api_key="token")
+
+        self.assertEqual(report.atomic_pages, 0)
+        self.assertEqual(report.incomplete_pages, 1)
+        self.assertEqual(report.incomplete_details, ["league-stuff: partial coverage"])
+        self.assertIn("incomplete (partial coverage)", stderr.getvalue())
+
+    def test_unused_extra_satellite_slug_does_not_block_split(self) -> None:
+        sources = [
+            bw.SourceRecord(
+                label="Aphelios",
+                path="../raw/aphelios.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Champion note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Velkoz",
+                path="../raw/velkoz.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Champion note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+        ]
+        pages = {
+            "league-stuff": bw.Page(
+                slug="league-stuff",
+                title="League Stuff",
+                page_type="Concepts",
+                summary_hint="League Stuff",
+                sources={source.path: source for source in sources},
+            )
+        }
+
+        with mock.patch.object(bw, "split_preflight_check", return_value=(True, None)):
+            with mock.patch.object(
+                bw,
+                "analyze_page_for_atomic_split",
+                return_value=bw.PageSplitDecision(
+                    is_atomic=False,
+                    candidate_satellite_slugs=["aphelios", "velkoz", "jhin"],
+                    source_assignments={
+                        "../raw/aphelios.md": "aphelios",
+                        "../raw/velkoz.md": "velkoz",
+                    },
+                ),
+            ):
+                report = bw.migrate_pages_to_atomic_topics(pages, {}, api_key="token")
+
+        self.assertEqual(report.split_pages, 1)
+        self.assertEqual(report.incomplete_pages, 0)
+        self.assertEqual(pages["league-stuff"].shape, bw.PAGE_SHAPE_TOPIC)
+        self.assertIn("aphelios", pages)
+        self.assertIn("velkoz", pages)
+
+    def test_missing_assignments_can_be_inferred_from_source_titles(self) -> None:
+        sources = [
+            bw.SourceRecord(
+                label="Aphelios",
+                path="../raw/aphelios.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Champion note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Velkoz",
+                path="../raw/velkoz.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Champion note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+        ]
+        pages = {
+            "league-stuff": bw.Page(
+                slug="league-stuff",
+                title="League Stuff",
+                page_type="Concepts",
+                summary_hint="League Stuff",
+                sources={source.path: source for source in sources},
+            )
+        }
+
+        with mock.patch.object(bw, "split_preflight_check", return_value=(True, None)):
+            with mock.patch.object(
+                bw,
+                "analyze_page_for_atomic_split",
+                return_value=bw.PageSplitDecision(
+                    is_atomic=False,
+                    candidate_satellite_slugs=["aphelios", "velkoz"],
+                    source_assignments={},
+                ),
+            ):
+                report = bw.migrate_pages_to_atomic_topics(pages, {}, api_key="token")
+
+        self.assertEqual(report.split_pages, 1)
+        self.assertEqual(report.incomplete_pages, 0)
+        self.assertEqual(pages["league-stuff"].shape, bw.PAGE_SHAPE_TOPIC)
+        self.assertEqual(pages["aphelios"].topic_parent, "league-stuff")
+        self.assertEqual(pages["velkoz"].topic_parent, "league-stuff")
+
+    def test_repeated_split_timeouts_do_not_abort_early(self) -> None:
+        pages = {}
+        for slug in ("travel", "camping", "league-of-legends"):
+            sources = [
+                bw.SourceRecord(
+                    label=f"{slug} note a",
+                    path=f"../raw/{slug}-a.md",
+                    status="local_only",
+                    raw_content="",
+                    cleaned_text="Note a.",
+                    fetched_summary=None,
+                    detected_url=None,
+                ),
+                bw.SourceRecord(
+                    label=f"{slug} note b",
+                    path=f"../raw/{slug}-b.md",
+                    status="local_only",
+                    raw_content="",
+                    cleaned_text="Note b.",
+                    fetched_summary=None,
+                    detected_url=None,
+                ),
+            ]
+            pages[slug] = bw.Page(
+                slug=slug,
+                title=bw.page_title(slug),
+                page_type="Concepts",
+                summary_hint=bw.page_title(slug),
+                sources={source.path: source for source in sources},
+            )
+
+        with mock.patch.object(bw, "split_preflight_check", return_value=(True, None)):
+            with mock.patch.object(
+                bw,
+                "analyze_page_for_atomic_split",
+                side_effect=TimeoutError("The read operation timed out"),
+            ) as analyze_mock:
+                stderr = StringIO()
+                with redirect_stderr(stderr):
+                    report = bw.migrate_pages_to_atomic_topics(pages, {}, api_key="token")
+
+        self.assertFalse(report.aborted)
+        self.assertEqual(report.mode, "performed")
+        self.assertEqual(report.status, "completed")
+        self.assertEqual(report.failed_pages, 3)
+        self.assertEqual(analyze_mock.call_count, 3)
+        self.assertNotIn("aborting early", stderr.getvalue())
+
+    def test_repeated_split_transport_failures_abort_early(self) -> None:
+        pages = {}
+        for slug in ("travel", "camping", "league-of-legends"):
+            sources = [
+                bw.SourceRecord(
+                    label=f"{slug} note a",
+                    path=f"../raw/{slug}-a.md",
+                    status="local_only",
+                    raw_content="",
+                    cleaned_text="Note a.",
+                    fetched_summary=None,
+                    detected_url=None,
+                ),
+                bw.SourceRecord(
+                    label=f"{slug} note b",
+                    path=f"../raw/{slug}-b.md",
+                    status="local_only",
+                    raw_content="",
+                    cleaned_text="Note b.",
+                    fetched_summary=None,
+                    detected_url=None,
+                ),
+            ]
+            pages[slug] = bw.Page(
+                slug=slug,
+                title=bw.page_title(slug),
+                page_type="Concepts",
+                summary_hint=bw.page_title(slug),
+                sources={source.path: source for source in sources},
+            )
+
+        with mock.patch.object(bw, "split_preflight_check", return_value=(True, None)):
+            with mock.patch.object(
+                bw,
+                "analyze_page_for_atomic_split",
+                side_effect=URLError("dns failed"),
+            ) as analyze_mock:
+                stderr = StringIO()
+                with redirect_stderr(stderr):
+                    report = bw.migrate_pages_to_atomic_topics(pages, {}, api_key="token")
+
+        self.assertTrue(report.aborted)
+        self.assertEqual(report.mode, "no-split")
+        self.assertEqual(report.status, "aborted_transport_failure")
+        self.assertEqual(report.failed_pages, 3)
+        self.assertEqual(analyze_mock.call_count, 3)
+        self.assertIn("aborting early", stderr.getvalue())
+
+    def test_target_slugs_limit_split_analysis(self) -> None:
+        pages = {}
+        for slug in ("travel", "camping"):
+            sources = [
+                bw.SourceRecord(
+                    label=f"{slug} note a",
+                    path=f"../raw/{slug}-a.md",
+                    status="local_only",
+                    raw_content="",
+                    cleaned_text="Note a.",
+                    fetched_summary=None,
+                    detected_url=None,
+                ),
+                bw.SourceRecord(
+                    label=f"{slug} note b",
+                    path=f"../raw/{slug}-b.md",
+                    status="local_only",
+                    raw_content="",
+                    cleaned_text="Note b.",
+                    fetched_summary=None,
+                    detected_url=None,
+                ),
+            ]
+            pages[slug] = bw.Page(
+                slug=slug,
+                title=bw.page_title(slug),
+                page_type="Concepts",
+                summary_hint=bw.page_title(slug),
+                sources={source.path: source for source in sources},
+            )
+
+        with mock.patch.object(bw, "split_preflight_check", return_value=(True, None)):
+            with mock.patch.object(
+                bw,
+                "analyze_page_for_atomic_split",
+                return_value=bw.PageSplitDecision(is_atomic=True),
+            ) as analyze_mock:
+                report = bw.migrate_pages_to_atomic_topics(
+                    pages,
+                    {},
+                    api_key="token",
+                    target_slugs={"travel"},
+                )
+
+        self.assertEqual(report.eligible_pages, 1)
+        self.assertEqual(analyze_mock.call_count, 1)
+        analyzed_page = analyze_mock.call_args.args[0]
+        self.assertEqual(analyzed_page.slug, "travel")
+
+    def test_bucket_signaled_page_with_good_split_becomes_topic(self) -> None:
+        sources = [
+            bw.SourceRecord(
+                label="Pesto Eggs",
+                path="../raw/pesto-eggs.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Recipe note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Vodka Pasta",
+                path="../raw/vodka-pasta.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Recipe note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Miso Salmon",
+                path="../raw/miso-salmon.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Recipe note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+        ]
+        page = bw.Page(
+            slug="recipe",
+            title="Recipe",
+            page_type="Concepts",
+            summary_hint="Recipe",
+            sources={source.path: source for source in sources},
+        )
+        page.rendered_notes_markdown = "### Breakfast\n- Pesto eggs\n### Dinner\n- Vodka pasta"
+        pages = {"recipe": page}
+
+        with mock.patch.object(bw, "split_preflight_check", return_value=(True, None)):
+            with mock.patch.object(
+                bw,
+                "analyze_page_for_atomic_split",
+                return_value=bw.PageSplitDecision(
+                    is_atomic=False,
+                    candidate_satellite_slugs=["pesto-eggs", "vodka-pasta", "miso-salmon"],
+                    source_assignments={
+                        "../raw/pesto-eggs.md": "pesto-eggs",
+                        "../raw/vodka-pasta.md": "vodka-pasta",
+                        "../raw/miso-salmon.md": "miso-salmon",
+                    },
+                ),
+            ):
+                report = bw.migrate_pages_to_atomic_topics(pages, {}, api_key="token")
+
+        self.assertEqual(report.split_pages, 1)
+        self.assertEqual(pages["recipe"].shape, bw.PAGE_SHAPE_TOPIC)
+        self.assertTrue(any(detail.startswith("recipe:") for detail in report.bucket_signaled_details))
+
+    def test_bucket_signaled_page_kept_atomic_is_reported_bucket_unsplit(self) -> None:
+        sources = [
+            bw.SourceRecord(
+                label="ICS 33",
+                path="../raw/ics-33.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Course note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="UCI Food",
+                path="../raw/uci-food.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Food note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="ARC Gym",
+                path="../raw/arc-gym.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Gym note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+        ]
+        page = bw.Page(
+            slug="uci",
+            title="UCI",
+            page_type="Entities",
+            summary_hint="UCI",
+            sources={source.path: source for source in sources},
+        )
+        page.connections["ics-33"] += 1
+        page.connections["uci-food"] += 1
+        page.connections["arc-gym"] += 1
+        pages = {"uci": page}
+
+        with mock.patch.object(bw, "split_preflight_check", return_value=(True, None)):
+            with mock.patch.object(
+                bw,
+                "analyze_page_for_atomic_split",
+                return_value=bw.PageSplitDecision(is_atomic=True),
+            ):
+                report = bw.migrate_pages_to_atomic_topics(pages, {}, api_key="token")
+
+        self.assertEqual(report.atomic_pages, 0)
+        self.assertEqual(report.failed_pages, 1)
+        self.assertEqual(report.bucket_unsplit_details, ["uci: bucket-unsplit (model_kept_atomic; signals=heterogeneous-sources, existing-satellites)"])
+        self.assertEqual(pages["uci"].shape, bw.PAGE_SHAPE_ATOMIC)
+
+    def test_bucket_signaled_page_with_unusable_output_is_reported_bucket_unsplit(self) -> None:
+        sources = [
+            bw.SourceRecord(
+                label="Pesto Eggs",
+                path="../raw/pesto-eggs.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Recipe note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Vodka Pasta",
+                path="../raw/vodka-pasta.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Recipe note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Miso Salmon",
+                path="../raw/miso-salmon.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Recipe note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+        ]
+        page = bw.Page(
+            slug="recipe",
+            title="Recipe",
+            page_type="Concepts",
+            summary_hint="Recipe",
+            sources={source.path: source for source in sources},
+        )
+        page.rendered_notes_markdown = "### Breakfast\n- Pesto eggs\n### Dinner\n- Vodka pasta"
+        pages = {"recipe": page}
+
+        with mock.patch.object(bw, "split_preflight_check", return_value=(True, None)):
+            with mock.patch.object(
+                bw,
+                "analyze_page_for_atomic_split",
+                return_value=bw.PageSplitDecision(
+                    is_atomic=False,
+                    candidate_satellite_slugs=["pesto-eggs", "vodka-pasta"],
+                    source_assignments={"../raw/pesto-eggs.md": "pesto-eggs"},
+                ),
+            ):
+                report = bw.migrate_pages_to_atomic_topics(pages, {}, api_key="token")
+
+        self.assertEqual(report.failed_pages, 1)
+        self.assertEqual(report.incomplete_pages, 0)
+        self.assertEqual(
+            report.bucket_unsplit_details,
+            ["recipe: bucket-unsplit (partial coverage; signals=generic-parent-slug, multi-cluster-notes, heterogeneous-sources)"],
+        )
+
+    def test_non_bucket_page_preserves_existing_gemini_atomic_behavior(self) -> None:
+        sources = [
+            bw.SourceRecord(
+                label="Moka Pot Tips",
+                path="../raw/moka-pot-a.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Brew ratio note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Moka Pot Cleaning",
+                path="../raw/moka-pot-b.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Cleaning note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+        ]
+        page = bw.Page(
+            slug="moka-pot",
+            title="Moka Pot",
+            page_type="Concepts",
+            summary_hint="Moka Pot",
+            sources={source.path: source for source in sources},
+        )
+        page.rendered_notes_markdown = "### Brewing\n- Lower heat helps.\n### Cleaning\n- Rinse only."
+        pages = {"moka-pot": page}
+
+        with mock.patch.object(bw, "split_preflight_check", return_value=(True, None)):
+            with mock.patch.object(
+                bw,
+                "analyze_page_for_atomic_split",
+                return_value=bw.PageSplitDecision(is_atomic=True),
+            ):
+                report = bw.migrate_pages_to_atomic_topics(pages, {}, api_key="token")
+
+        self.assertEqual(report.atomic_pages, 1)
+        self.assertEqual(report.failed_pages, 0)
+        self.assertEqual(report.bucket_unsplit_details, [])
+
+    def test_lecture_like_page_skips_split_analysis_and_stays_atomic(self) -> None:
+        sources = [
+            bw.SourceRecord(
+                label="Week 1 Recursion",
+                path="../raw/Apple Notes/Marcus/Archives/ICS 33/week-1-recursion.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Lecture 1 covered recursion.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Week 2 Iterators",
+                path="../raw/Apple Notes/Marcus/Archives/ICS 33/week-2-iterators.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Lecture 2 covered iterators.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Final Review",
+                path="../raw/Apple Notes/Marcus/Archives/ICS 33/final-review.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Final review topics.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+        ]
+        page = bw.Page(
+            slug="ics-33",
+            title="ICS 33",
+            page_type="Concepts",
+            summary_hint="ICS 33",
+            sources={source.path: source for source in sources},
+        )
+        page.rendered_notes_markdown = "### Week 1\n- Recursion.\n### Week 2\n- Iterators."
+        pages = {"ics-33": page}
+
+        with mock.patch.object(bw, "split_preflight_check", return_value=(True, None)):
+            with mock.patch.object(
+                bw,
+                "analyze_page_for_atomic_split",
+                return_value=bw.PageSplitDecision(
+                    is_atomic=False,
+                    candidate_satellite_slugs=["recursion", "iterators", "final-review"],
+                    source_assignments={
+                        "../raw/Apple Notes/Marcus/Archives/ICS 33/week-1-recursion.md": "recursion",
+                        "../raw/Apple Notes/Marcus/Archives/ICS 33/week-2-iterators.md": "iterators",
+                        "../raw/Apple Notes/Marcus/Archives/ICS 33/final-review.md": "final-review",
+                    },
+                ),
+            ) as analyze_mock:
+                stderr = StringIO()
+                with redirect_stderr(stderr):
+                    report = bw.migrate_pages_to_atomic_topics(pages, {}, api_key="token")
+
+        analyze_mock.assert_not_called()
+        self.assertEqual(report.atomic_pages, 1)
+        self.assertEqual(report.analyzed_pages, 0)
+        self.assertEqual(report.split_pages, 0)
+        self.assertEqual(pages["ics-33"].shape, bw.PAGE_SHAPE_ATOMIC)
+        self.assertIn("course lecture guard", stderr.getvalue())
+
+    def test_bootstrap_main_sandbox_keeps_lecture_page_atomic(self) -> None:
+        lecture_notes = {
+            "Week 1 Recursion.md": "# Week 1 Recursion\n\n## Key Ideas\n\n- Recursive functions\n- Base cases\n",
+            "Week 2 Iterators.md": "# Week 2 Iterators\n\n## Key Ideas\n\n- Iterators\n- Generators\n",
+            "Final Review.md": "# Final Review\n\n## Topics\n\n- Recursion\n- Iterators\n- Classes\n",
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            raw_root = root / "raw" / "ICS 33"
+            raw_root.mkdir(parents=True)
+            (root / "wiki").mkdir()
+            for name, content in lecture_notes.items():
+                (raw_root / name).write_text(content, encoding="utf-8")
+
+            with bw.temporary_workspace(root):
+                with mock.patch.dict("os.environ", {"GEMINI_API_KEY": ""}, clear=False):
+                    with mock.patch.object(bw, "split_preflight_check", return_value=(True, None)):
+                        with mock.patch.object(
+                            bw,
+                            "analyze_page_for_atomic_split",
+                            return_value=bw.PageSplitDecision(
+                                is_atomic=False,
+                                candidate_satellite_slugs=["recursion", "iterators", "classes"],
+                                source_assignments={},
+                            ),
+                        ) as analyze_mock:
+                            with mock.patch.object(sys, "argv", ["bootstrap_wiki.py"]):
+                                bw.main()
+
+                analyze_mock.assert_not_called()
+                course_page = (bw.WIKI_ROOT / "ics-33.md").read_text(encoding="utf-8")
+                self.assertIn("# ICS 33", course_page)
+                self.assertIn("## Notes", course_page)
+                self.assertIn("## Sources", course_page)
+                self.assertNotIn("## Connections\n\n- [[recursion]]", course_page)
+                self.assertFalse((bw.WIKI_ROOT / "recursion.md").exists())
+                self.assertIn('bootstrap | completed', (bw.WIKI_ROOT / "log.md").read_text(encoding="utf-8"))
+
+    def test_manifest_failed_split_slugs_reads_failure_details(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = Path(tmpdir) / "manifest.json"
+            payload = {
+                "split_phase": {
+                    "failure_details": [
+                        "league-stuff: TimeoutError: The read operation timed out",
+                        "travel: ValueError: bad JSON",
+                    ],
+                    "incomplete_details": [
+                        "limits: partial coverage",
+                    ],
+                    "bucket_signaled_details": [
+                        "recipe: generic-parent-slug, multi-cluster-notes",
+                    ],
+                    "bucket_unsplit_details": [
+                        "uci: bucket-unsplit (model_kept_atomic; signals=heterogeneous-sources, existing-satellites)",
+                    ],
+                }
+            }
+            manifest_path.write_text(bw.stable_json_dumps(payload), encoding="utf-8")
+            with mock.patch.object(bw, "CACHE_MANIFEST_PATH", manifest_path):
+                self.assertEqual(bw.manifest_failed_split_slugs(), {"league-stuff", "travel", "limits", "recipe", "uci"})
+
+
+if __name__ == "__main__":
+    unittest.main()

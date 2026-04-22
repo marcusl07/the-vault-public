@@ -1,0 +1,24 @@
+Single-Source Split Spec
+========================
+
+Problem
+-------
+The current wiki split pipeline only supports splitting a page when that page is backed by multiple source notes. This prevents one long lecture note from being turned into multiple atomic wiki notes, even when the source clearly contains several distinct reusable ideas.
+
+Requirement
+-----------
+The wiki system should support splitting a single source note into multiple atomic wiki notes when the note contains multiple separable concepts. Lecture notes are an important example, but this should apply more generally to any single note that naturally contains several atomic ideas.
+
+Big Idea
+--------
+Splitting should not be limited to whole-source assignment. The system needs a way to recognize multiple atomic notes inside one source note and allow those ideas to become separate wiki pages.
+
+Why It Matters
+--------------
+- One lecture note often covers several concepts that should be independently searchable and linkable.
+- Keeping an entire lecture as one note reduces the value of the wiki graph.
+- The current multi-source-only split rule blocks a meaningful class of atomic-note creation.
+
+Non-Goal For This Spec
+----------------------
+This spec does not define the exact implementation, data model, prompting strategy, or rendering behavior. It only records the product requirement that single-source splitting must be possible.

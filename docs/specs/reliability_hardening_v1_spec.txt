@@ -1,0 +1,321 @@
+# Reliability Hardening for `vault_pipeline.py` v1
+
+## Summary
+Implement bounded retry, crash-safety, and stale-lock hardening in `scripts/vault_pipeline.py` with a file-state-first model and explicit capture-ID-based raw discovery.
+
+Key decisions:
+- Raw recovery identity is `capture_id`, not current title-derived path.
+- Raw discovery is a bounded scan over markdown raw notes only, with explicit ambiguity rules.
+- `ingest_attempts` remains the existing frontmatter field, but is only the retry gate for retryable export-stage failures.
+- `processed_without_raw` is a diagnostic corruption state: it logs `export_failed` but does not consume retry budget.
+- JSONL is a durable event sink for successful append calls only; it is not a complete or authoritative history.
+
+## State Model
+- `injection_attempts` is a lifetime counter of durably recorded UUID-injection failures.
+- `ingest_attempts` is a lifetime counter of durably recorded retry-gated export-stage failures only.
+- `processed_without_raw` never increments `ingest_attempts`.
+- Counters are never reset.
+
+Source-note assumptions:
+- Normal automation expects one unprocessed source note per file path.
+- Duplicate unprocessed source notes with the same `capture_id` are treated as source corruption if encountered.
+- Add export-stage failure class `source_identity_ambiguous` for this case; it is retry-gated.
+
+Processed notes:
+- Processed notes are terminal for automatic repair.
+- They are still valid diagnostic inputs for corruption detection and logging.
+- “Terminal for automation” means “not used as mutable recovery inputs,” not “ignored by automation.”
+
+Eligibility:
+- UUID injection is eligible iff exactly one unprocessed source note is under consideration, `capture_id` is missing, and (`injection_attempts < 3` or `--retry-failed`).
+- Raw export is eligible iff exactly one unprocessed source note is under consideration, `capture_id` exists, and (`ingest_attempts < 3` or `--retry-failed`).
+- Wiki ingest is eligible iff the caller-provided raw path is ingest-valid and (`integrated_at` is missing or not parseable as completion, or `--retry-failed`).
+
+`--retry-failed` semantics:
+- It only overrides the retry gate for failures that count against `ingest_attempts` or `injection_attempts`.
+- It does not make `processed_without_raw` automatically repairable from a processed note.
+- It does not override ambiguity states that still require disambiguation or repair first.
+
+## Raw Discovery and Identity
+Raw discovery scope for capture-stage recovery is strict:
+- scan recursively under `RAW_ROOT`
+- consider only regular files with `.md` suffix
+- ignore non-markdown files
+- ignore symlinks
+- identify candidates by parsing frontmatter and matching `capture_id`
+
+Candidate categories for a given source note `capture_id`:
+- `matching_valid`: markdown raw files whose frontmatter parses and are adoption-valid
+- `matching_invalid`: markdown raw files whose frontmatter parses enough to read `capture_id`, the `capture_id` matches, but the file is not adoption-valid
+- `unparseable_unknown`: markdown raw files that cannot be parsed at all and therefore cannot be assigned a trusted `capture_id`
+
+Adoption-valid raw:
+- regular `.md` file under `RAW_ROOT`
+- not a symlink
+- frontmatter parses under the pipeline’s existing parser
+- parsed markdown body after frontmatter is non-blank by `.strip()`
+- `capture_id` exists, is a non-empty string, and equals the source note `capture_id`
+
+Ingest-valid raw:
+- adoption-valid
+- `title` exists and is a non-empty string
+
+Identity and ambiguity rules:
+- If `matching_valid` has exactly 1 entry and `matching_invalid` has 0 entries, adopt that raw.
+- If `matching_valid` has more than 1 entry, fail as `raw_identity_ambiguous`.
+- If `matching_valid` has exactly 1 entry and `matching_invalid` has 1 or more entries, fail as `raw_identity_ambiguous`.
+- If `matching_valid` has 0 entries and `matching_invalid` has 1 or more entries, fail as `raw_invalid_existing`; do not create a new raw.
+- If both `matching_valid` and `matching_invalid` are empty, create a new raw at the expected title-derived target path.
+- `unparseable_unknown` files never count as matching candidates because their identity is unknowable under the contract. They do not block recovery unless they occupy the exact target path for a create operation, in which case creation fails as `raw_create_failed`.
+
+Consequences:
+- Invalid duplicates with the same trusted `capture_id` do block recovery.
+- Fully unparseable files do not create identity ambiguity because the system cannot safely ascribe identity to them.
+- Current title-derived path is only the creation target for new raw files, not recovery identity.
+- Slugging, truncation, sanitization, and Unicode normalization remain relevant only to new-file naming, not adoption identity.
+
+## Raw Validation, Completion, and Regression Rules
+Adoption-valid but not ingest-valid raw:
+- may be adopted during capture-stage recovery
+- blocks wiki ingest until externally repaired
+- this decoupling is intentional in v1
+
+`integrated_at` completion rule:
+- A raw note counts as already integrated only if:
+  - the file is adoption-valid
+  - `integrated_at` exists and is parseable in exact `utc_timestamp()` format
+- Completion does not require current ingest-validity.
+- This avoids post-success title damage making a previously integrated raw appear incomplete.
+- Wiki ingest eligibility still requires ingest-valid raw.
+
+Therefore:
+- A raw file may count as “already integrated” for retry suppression while also being currently not ingest-valid for a fresh ingest attempt.
+- Manual or accidental valid `integrated_at` can still falsely suppress automatic ingest; accepted in v1.
+
+## Audit Events
+New code appends only these canonical event names:
+- `uuid_injected`
+- `injection_failed`
+- `injection_skipped`
+- `exported_to_raw`
+- `export_failed`
+- `empty_deleted`
+- `marked_processed`
+- `ingest_succeeded`
+- `ingest_failed`
+
+Canonical means canonical names, not complete history.
+
+Semantics:
+- `uuid_injected`: this run durably wrote a newly generated `capture_id`.
+- `injection_failed`: one durably counted UUID-injection failure.
+- `injection_skipped`: one skipped run after threshold.
+- `exported_to_raw`: this run reached adoption-valid raw state and includes which raw path was used.
+- `marked_processed`: this run successfully appended a record of processed rename; absence does not negate a durable rename.
+- `export_failed`: this run observed an export-stage failure; whether retry budget was consumed is explicit in the payload.
+- `ingest_succeeded`: this run successfully completed wiki ingest.
+- `ingest_failed`: this run exhausted three in-process wiki-ingest retries.
+
+Required fields:
+- `uuid_injected`: `capture_id`, `filename`
+- `injection_failed`: `filename`, `error`, `injection_attempts`
+- `injection_skipped`: `filename`, `injection_attempts`, `reason: "threshold_reached"`
+- `exported_to_raw`: `capture_id`, `raw_path`, `mode: "created" | "adopted"`, `candidate_count`
+- `export_failed`: `capture_id`, `source_filename`, `error`, `failure_class`, `counted_against_retry_gate`
+- `empty_deleted`: `filename`, optional `capture_id`, `reason: "empty_after_trim"`
+- `marked_processed`: `capture_id`, `filename`
+- `ingest_succeeded`: `capture_id`, `raw_path`
+- `ingest_failed`: `capture_id`, `raw_path`, `error`
+
+Notes on event fields:
+- `source_filename` always refers to the source-note filename that drove the export-stage decision, whether unprocessed or processed.
+- `candidate_count` is:
+  - `0` when `mode: "created"`
+  - `1` when `mode: "adopted"` in v1, because adoption only occurs on a unique valid candidate
+- `candidate_count` exists to make identity-resolution behavior explicit in logs.
+
+`failure_class` is closed in v1:
+- `raw_create_failed`
+- `raw_invalid_existing`
+- `raw_identity_ambiguous`
+- `processed_without_raw`
+- `source_rename_failed`
+- `source_identity_ambiguous`
+
+Classification rules:
+- `raw_identity_ambiguous`:
+  - multiple adoption-valid matches
+  - one adoption-valid plus one or more invalid-but-same-`capture_id` matches
+- `raw_invalid_existing`:
+  - zero adoption-valid matches
+  - one or more invalid-but-same-`capture_id` matches
+- `processed_without_raw`:
+  - processed source note exists
+  - no adoption-valid raw exists for its `capture_id`
+- `source_identity_ambiguous`:
+  - multiple unprocessed source notes with the same `capture_id`
+
+`counted_against_retry_gate` rules:
+- `true` for `raw_create_failed`, `raw_invalid_existing`, `raw_identity_ambiguous`, `source_rename_failed`, `source_identity_ambiguous`
+- `false` for `processed_without_raw`
+
+Counter/log consistency rule:
+- `export_failed` must never be appended with `counted_against_retry_gate: true` unless the `ingest_attempts` increment was durably committed first.
+- If the increment fails, do not append that `export_failed`.
+- `processed_without_raw` may append `export_failed` with `counted_against_retry_gate: false` without any counter mutation.
+
+Recurrence rule:
+- `processed_without_raw` is a per-run observation and may be logged repeatedly across runs until state is manually repaired.
+- This matches the general per-run event model.
+
+## Durability and Ordering
+### UUID injection
+Implementation constraint:
+- `inject_capture_id()` must perform no repo-root file mutation except the final atomic rewrite that persists the generated `capture_id`.
+
+Behavior:
+- Success:
+  1. atomic rewrite of unprocessed source note with generated `capture_id`
+  2. append `uuid_injected`
+- Failure:
+  1. atomic rewrite increments `injection_attempts`
+  2. append `injection_failed`
+- If counter increment fails, do not append `injection_failed`.
+
+### Raw export
+Run-level export success means:
+- an adoption-valid raw exists for the note’s `capture_id`
+- the unprocessed source note was renamed processed in that run
+
+Ordered algorithm:
+1. identify the single source-note subject
+2. if source identity is ambiguous, increment `ingest_attempts`, append `export_failed(source_identity_ambiguous)`, stop
+3. discover raw candidates by `capture_id` using the scan contract above
+4. branch:
+   - exactly 1 valid and 0 invalid: adopt it
+   - more than 1 valid, or 1 valid plus invalids: increment `ingest_attempts`, append `export_failed(raw_identity_ambiguous)`, stop
+   - 0 valid and 1+ invalid: increment `ingest_attempts`, append `export_failed(raw_invalid_existing)`, stop
+   - 0 valid and 0 invalid: create new raw at expected target path
+5. after adopt/create succeeds, append `exported_to_raw`
+6. rename unprocessed source note processed
+7. append `marked_processed`
+
+Creation-specific rule:
+- If create target path already exists but is not the uniquely adopted raw for this run, treat the create as `raw_create_failed`.
+
+Rename-failure consequences:
+- If rename fails after raw already exists, raw remains authoritative and eligible for future adoption by `capture_id`.
+- `source_rename_failed` counts against retry gate and increments `ingest_attempts` before logging.
+
+Processed-note corruption detection:
+- If a processed source note is examined and no adoption-valid raw exists for its `capture_id`, append `export_failed(processed_without_raw, counted_against_retry_gate=false)`.
+- No automatic export repair is attempted from that processed file.
+
+### Wiki ingest
+Success:
+1. integration handler succeeds
+2. raw rewrite sets parseable `integrated_at`
+3. append `ingest_succeeded`
+
+Failure:
+- after three in-process retries, append `ingest_failed`
+
+If event append fails after durable `integrated_at`, raw state remains authoritative.
+
+## Locking
+Use advisory `flock` with best-effort stale recovery.
+
+Metadata:
+- `version: 1`
+- `owner_token: <uuid4>`
+- `pid: <int>`
+- `acquired_at: <utc_timestamp() string>`
+- `capture_root: <string>`
+
+Behavior:
+1. Open `pipeline.lock`
+2. Try nonblocking `flock`
+3. If acquired:
+   - rewrite metadata from offset 0
+   - truncate trailing content
+   - flush and fsync
+   - if metadata write fails, release lock and raise
+4. If contended:
+   - parse metadata strictly using exact `utc_timestamp()` format
+   - compare to local wall clock
+   - if older than 30 minutes, stale recovery may proceed
+   - otherwise raise lock-held
+
+Stale recovery:
+- Use global sidecar sentinel `pipeline.lock.stale-claim`
+- Winner is the process that creates sentinel via `O_CREAT | O_EXCL`
+- Winner attempts stale replacement once
+- Loser fails lock-held immediately
+- Stranded sentinel may block future recovery for the same lock path until manual cleanup; accepted in v1 even though it is not instance-specific
+- `owner_token` is informational only in v1
+- `flock` remains inode-based; path replacement may diverge from old unlinked-but-held inode state; accepted in v1
+- Clock skew / suspend-resume may cause wrongful or missed stale override; accepted in v1
+
+## Atomic Writes
+Within `vault_pipeline.py`, every repo-root file write it performs directly or transitively through helper code it invokes must use `atomic_write_text()` except:
+- JSONL append
+- lockfile metadata writes
+- stale-claim sentinel create/remove
+
+This includes:
+- source note rewrites
+- raw note writes / rewrites
+- wiki page rewrites
+- `wiki/index.md`
+- `wiki/log.md`
+
+“Transitively through helper code it invokes” is intended to include lower-level utility writes caused by those helpers, not only first-level helpers.
+
+Guarantee:
+- temp in same directory
+- full write
+- flush and fsync temp file
+- atomic replace
+
+## Reconciliation Rules
+- Automatic capture-stage recovery uses:
+  - the source-note subject
+  - raw candidates discovered by `capture_id`
+- Title/path drift does not block recovery if there is a unique adoption-valid raw for the `capture_id`.
+- Raw files at arbitrary paths are relevant only if they are markdown raw notes under `RAW_ROOT`, not symlinks, and match trusted `capture_id`.
+- Later wiki-ingest completion is determined from adoption-valid raw plus parseable `integrated_at`.
+- Wiki-ingest eligibility is determined from ingest-valid raw plus missing/unparseable completion marker.
+- JSONL never overrides durable file state for automation decisions.
+
+## Tests
+Update `tests/test_vault_pipeline.py` to lock down:
+- raw discovery scans recursively under `RAW_ROOT` and only `.md` regular files
+- symlinks are ignored
+- non-markdown files are ignored
+- exactly one valid + zero invalid match is adoptable
+- multiple valid matches => `raw_identity_ambiguous`
+- one valid + one invalid same-`capture_id` => `raw_identity_ambiguous`
+- zero valid + one or more invalid same-`capture_id` => `raw_invalid_existing`
+- zero valid + zero invalid => create new raw
+- unparseable files without trusted `capture_id` do not count as matching duplicates
+- title/path drift does not block recovery when there is a unique valid match by `capture_id`
+- processed_without_raw logs repeatedly per run and never increments `ingest_attempts`
+- retry-gated failures never log `counted_against_retry_gate: true` unless the counter increment succeeded
+- `source_filename` is always the source-note filename in `export_failed`
+- rename failure leaves raw eligible for future adoption
+- completion suppression uses adoption-valid + parseable `integrated_at`
+- fresh ingest eligibility uses ingest-valid + missing/unparseable completion
+- duplicate unprocessed source notes with same `capture_id` => `source_identity_ambiguous`
+- helper-induced repo-root writes used by this script still go through `atomic_write_text()`
+
+## Assumptions
+- `capture_id` is intended to be unique across notes, but v1 treats collisions as corruption rather than assuming impossibility.
+- `ingest_attempts` remains a legacy-compatible retry-gate field, not a full export-observability counter.
+- JSONL remains intentionally lossy: durable for successful append calls, but not complete or authoritative.
+- Manual cleanup is acceptable for stranded stale-claim sentinels and malformed lock metadata.
+
+## Atomic Tasks
+1. Raw discovery + candidate classification by `capture_id`
+2. Export-stage state machine and `export_failed` / `exported_to_raw` semantics
+3. `processed_without_raw`, retry-gate rules, and counter/log ordering
+4. Locking + JSONL durability hardening + tests

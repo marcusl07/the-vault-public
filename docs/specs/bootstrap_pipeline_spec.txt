@@ -1,0 +1,676 @@
+The Vault: Bear Capture Pipeline v1.1 Spec
+
+Goal
+Build a local, laptop-first capture pipeline for The Vault that:
+1. discovers newly captured notes in Bear
+2. exports them to immutable markdown files in raw/
+3. tracks pipeline state in SQLite
+4. marks Bear notes as exported
+5. passes newly exported raw notes into a separate wiki-ingest stage
+
+The pipeline is optimized for machine use first, idempotency, crash safety, incremental processing, and low operational complexity.
+
+Non-goals
+Not in scope for v1.1:
+- re-exporting previously exported Bear notes based on later edits
+- network enrichment during Bear export
+- tags-based workflow state
+- automatic bidirectional wiki-link mutation
+- distributed execution
+- event-sourced state as the primary model
+- processed/unprocessed subfolders inside raw/
+- automatic reconstruction of SQLite state from raw/
+
+1. High-level architecture
+
+Scripts
+bear_ingest.py
+Responsible only for:
+- discovering candidate Bear notes
+- deleting truly empty notes
+- exporting non-empty notes to raw/
+- updating pipeline state
+- marking successfully exported Bear notes with "✓ "
+- emitting structured results for the orchestrator
+
+ingest_raw_notes.py
+Responsible only for:
+- ingesting exported raw notes into the wiki
+- updating wiki-ingest state in SQLite
+- logging successes and failures
+- never touching Bear
+
+run_vault_pipeline.py
+Thin orchestrator that:
+1. runs bear_ingest.py
+2. receives the exact set of newly exported raw notes
+3. passes only that delta into ingest_raw_notes.py
+
+Important:
+- stages are separated by responsibility
+- each note is committed individually inside each stage
+- failure midway through a run must not erase earlier completed work
+
+2. Core design principles
+
+2.1 Bear is capture-only
+Bear is a capture layer, not the long-term knowledge base.
+
+Operational assumption:
+- Marcus will rarely edit captured Bear notes after creation
+- if an idea evolves, a new Bear note is usually created
+
+This does not mean the pipeline never touches Bear again.
+It means:
+- the raw artifact is created at most once per bear_id
+- exported_at is set at most once per bear_id, except for crash-recovery adoption of a pre-existing valid raw file
+- later runs may still repair the Bear title marker if needed
+
+2.2 raw/ is immutable
+raw/ is the durable source-note archive.
+
+Rules:
+- files in raw/ are never moved
+- files in raw/ are never re-authored after successful export
+- no processed/unprocessed subfolders
+- workflow state lives in SQLite, not in the filesystem layout
+
+2.3 SQLite is the operational source of truth
+Pipeline correctness is determined by:
+- bear_id
+- SQLite state
+
+Bear title markers are convenience and debug signals only.
+
+2.4 Machine-first design
+Where human readability and machine usefulness conflict, optimize for machine usefulness.
+
+Examples:
+- YAML frontmatter
+- JSONL logs
+- explicit state columns
+- structured CLI behavior
+- normalized path semantics
+
+2.5 Recovery boundary
+Normal operation uses SQLite as the source of truth.
+
+The append-only raw/ archive may support future manual or offline recovery, but automatic reconstruction of SQLite state from raw/ is out of scope for v1.1.
+
+This pipeline must not scan all of raw/ on normal runs.
+
+3. Canonical identity
+
+Primary key
+Use Bear internal note ID as the canonical identifier for each note.
+
+This ID is used in:
+- SQLite state
+- raw filenames
+- JSONL logs
+- inter-script handoff
+
+Invariant
+For a given bear_id:
+- at most one final raw markdown artifact exists
+- exported_at is set at most once in normal operation, except for crash-recovery adoption of a valid pre-existing file
+- integrated_at is set at most once for the v1 wiki-ingest stage
+
+4. Time and path normalization
+
+4.1 Timestamp format
+All timestamps stored in SQLite and JSONL must use:
+- UTC
+- ISO 8601
+- trailing Z
+
+Example:
+2026-04-20T17:32:00Z
+
+No local naive timestamps.
+
+4.2 raw_path format
+raw_path must be stored as a:
+- repository-relative
+- POSIX-style path string
+
+Example:
+raw/gym-plan-123.md
+
+Never store absolute paths in SQLite or logs.
+
+5. Eligibility rules
+
+5.1 Candidate discovery
+When bear_ingest.py examines a Bear note as a discovery candidate, it must not assume that marker presence or absence determines eligibility.
+
+Implementation may use marker state as a performance hint, but correctness must not depend on it.
+
+Rules:
+- notes with or without "✓ " may be examined
+- final eligibility is determined by SQLite state, content rules, and retry thresholds
+
+This prevents bad optimizations that would break marker repair or crash recovery.
+
+5.2 Empty note rule
+Use the cleaned title as the canonical title signal for empty-note handling.
+
+A note is deletable only when:
+- body content is blank after trimming
+- cleaned title is a placeholder title
+
+For v1.1, placeholder title means:
+- cleaned title equals "Untitled", case-insensitively
+
+If a note matches that deletable-empty rule:
+- delete it from Bear immediately
+- do not create a SQLite row
+- do not create a raw file
+- do not mark Bear with "✓ "
+- append a JSONL log event recording the deletion
+
+If body content is blank after trimming but the cleaned title is meaningful:
+- treat the note as a valid capture
+- continue through normal discovery and export
+- preserve the cleaned title in raw frontmatter
+- render the raw body using the normal synthetic heading format
+
+Because no SQLite row is created for empty-note deletions in v1.1, JSONL is the only durable audit trail for this action.
+
+Required JSONL fields:
+- ts
+- event: "empty_deleted"
+- bear_id
+- title
+- reason: "empty_after_trim"
+
+Under --dry-run, empty notes must be reported but not deleted.
+
+Discovery-row creation applies only to notes that survive the empty-note check.
+
+Empty-note deletions are a deliberate exception: they are logged to JSONL only and do not create SQLite rows in v1.1.
+
+5.3 URLs
+URL-only notes are valid inputs and must be exported.
+
+bear_ingest.py performs no network enrichment.
+URL fetching, title resolution, and content extraction belong to the raw-to-wiki stage.
+
+6. Title normalization
+
+6.1 Clean title rule
+The canonical clean title is:
+- the current Bear title
+- with at most one leading exact "✓ " prefix removed
+- everything else preserved literally
+
+Examples:
+- "✓ My note" -> "My note"
+- "✓ ✓ My note" -> "✓ My note"
+- "✓My note" -> "✓My note"
+- "  ✓ My note" -> "  ✓ My note"
+
+No aggressive normalization beyond removing one exact leading marker prefix.
+
+6.2 Title storage semantics
+For frontmatter and DB title:
+- preserve the clean title literally
+- do not trim or rewrite it except for the exact marker stripping rule above
+
+6.3 Slug input semantics
+For slug generation only:
+- trim surrounding whitespace
+- sanitize characters per slug rules
+- if the resulting slug is empty, use "untitled"
+
+The title stored in frontmatter preserves all content except that one exact leading marker prefix removal.
+
+7. Raw file format
+
+7.1 File location
+Raw files live under:
+wiki-root/raw/
+
+7.2 Filename format
+Use:
+<slug>-<bear_id>.md
+
+Example:
+gym-plan-84736291.md
+
+Uniqueness comes from bear_id, not the slug.
+
+7.3 Slug rules
+Slug generation:
+- lowercase
+- replace spaces with "-"
+- remove unsafe and special filename characters
+- collapse repeated "-"
+- trim slug to a maximum of 80 characters before appending -<bear_id>.md
+- if empty after sanitization, use "untitled"
+
+7.4 Frontmatter
+Each raw file includes YAML frontmatter:
+
+---
+bear_id: 123456789
+title: My note title
+created_at: 2026-04-20T17:32:00Z
+---
+
+Included fields:
+- bear_id
+- title
+- created_at
+
+No tags in v1.1.
+
+Title normalization rule:
+- the canonical clean title is the current Bear title with at most one leading exact prefix "✓ " removed
+- no other title normalization is performed for frontmatter storage
+
+7.5 Body format
+Raw file body is:
+
+---
+bear_id: 123456789
+title: My note title
+created_at: 2026-04-20T17:32:00Z
+---
+
+# My note title
+
+<Bear content exactly as stored>
+
+The # <title> line is synthetic and is always included in v1.1.
+
+The Bear note body that follows must otherwise be written exactly as stored, with no cleanup or normalization.
+
+If this results in duplicated headings or duplicated title text, that is acceptable in v1.1.
+
+7.6 Raw file write semantics
+Raw file creation must be crash-safe.
+
+Rules:
+- write to a temporary file in the same filesystem as the target path
+- fsync the temp file before rename if implemented
+- atomically rename the temp file to the final target path
+
+The pipeline must never write directly into the final raw file path.
+
+If the final target path already exists while the SQLite row for that bear_id has exported_at IS NULL, treat this as a crash-recovery condition, not a normal overwrite.
+
+Recovery behavior:
+- open the existing file
+- validate that its frontmatter bear_id matches the current Bear note ID
+- if it matches, adopt the file:
+  - set raw_path
+  - set exported_at
+  - clear last_error
+  - update updated_at
+  - continue to Bear marker step
+- if it does not match, fail the note for this run:
+  - increment export_attempts
+  - set last_error
+  - update updated_at
+  - append a failure event to JSONL
+  - do not overwrite the existing file
+
+This preserves append-only raw semantics while allowing recovery from a crash between file creation and SQLite commit.
+
+8. Bear export marker
+
+Marker choice
+Export marker is the exact prefix:
+"✓ "
+
+Example:
+"✓ My note title"
+
+Purpose
+The marker is:
+- a convenience or debug signal
+- optionally useful as a candidate hint
+
+The marker is not the source of truth.
+
+Marker write and marker repair both operate on the current Bear title, not the title stored in SQLite.
+
+Marker rule:
+- remove at most one leading exact "✓ " prefix from the current Bear title
+- prepend exactly one "✓ " prefix
+- write the result back to Bear
+
+This avoids clobbering later title edits while keeping marker format deterministic.
+
+Candidate discovery must not rely solely on marker absence.
+
+Notes with or without the "✓ " prefix may be examined during discovery. Final eligibility is determined by SQLite state and content rules.
+
+9. SQLite pipeline state
+
+9.1 Storage
+Use SQLite for operational state.
+
+9.2 Primary table
+CREATE TABLE notes (
+    bear_id TEXT PRIMARY KEY,
+    title TEXT,
+    raw_path TEXT,
+    discovered_at TEXT,
+    exported_at TEXT,
+    bear_marked_at TEXT,
+    integrated_at TEXT,
+    export_attempts INTEGER NOT NULL DEFAULT 0,
+    integrate_attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    updated_at TEXT NOT NULL
+);
+
+9.3 Column semantics
+
+bear_id
+Canonical pipeline identifier.
+
+title
+Canonical clean title at discovery time.
+This is metadata, not authority over future Bear-title repair.
+
+raw_path
+Repository-relative POSIX path to the exported raw file, for example:
+raw/gym-plan-123.md
+
+Do not store absolute paths.
+
+discovered_at
+Set when the pipeline first inserts a row for a non-empty candidate note.
+
+exported_at
+Set once the raw artifact is confirmed present and adopted by SQLite.
+
+bear_marked_at
+Set once the Bear title marker has been successfully applied.
+
+integrated_at
+Set when the raw note successfully completes the v1 wiki-ingest stage as currently defined.
+
+export_attempts
+Counts failed export runs after exhausting per-run retries.
+
+integrate_attempts
+Counts failed wiki-ingest runs after exhausting per-run retries.
+
+last_error
+Most recent error message across any pipeline stage. This is a convenience summary only, not a complete history. Exact failure history lives in append-only JSONL logs.
+
+updated_at
+Updated whenever the row changes.
+
+All timestamps in SQLite and JSONL must be stored as UTC ISO 8601 strings with Z, for example:
+2026-04-20T17:32:00Z
+
+10. Logging
+
+Format
+Use append-only JSONL:
+wiki/log.jsonl
+
+Each line is one JSON object.
+
+Required fields
+Every log event must include:
+- ts
+- event
+- bear_id when applicable
+
+Optional fields:
+- title
+- raw_path
+- error
+- reason
+- stage
+
+Example events
+{"ts":"2026-04-20T17:32:00Z","event":"discovered","bear_id":"123","title":"gym plan"}
+{"ts":"2026-04-20T17:33:00Z","event":"exported","bear_id":"123","raw_path":"raw/gym-plan-123.md"}
+{"ts":"2026-04-20T17:33:01Z","event":"bear_marked","bear_id":"123"}
+{"ts":"2026-04-20T17:35:00Z","event":"integrated","bear_id":"123"}
+{"ts":"2026-04-20T17:36:00Z","event":"export_failed","bear_id":"456","stage":"export","error":"permission denied"}
+{"ts":"2026-04-20T17:37:00Z","event":"empty_deleted","bear_id":"789","title":" ","reason":"empty_after_trim"}
+
+11. Export workflow
+
+11.1 Discovery flow
+For each candidate Bear note:
+1. read title and content
+2. compute clean title
+3. if body content is blank after trimming and clean title is a placeholder
+   - delete from Bear
+   - log empty_deleted
+   - stop
+4. if row missing, insert row with:
+   - bear_id
+   - title
+   - discovered_at
+   - updated_at
+5. proceed to export eligibility checks
+
+11.2 Export eligibility
+A note is eligible for export when:
+- exported_at IS NULL
+- export_attempts < 3, unless --retry-failed is set
+- it survived the empty-note filter
+
+11.3 Export phase ordering
+Required order:
+1. create or adopt raw artifact
+2. update SQLite:
+   - set raw_path
+   - set exported_at
+   - clear last_error
+   - update updated_at
+3. apply Bear title marker
+4. if marker succeeds:
+   - set bear_marked_at
+   - clear last_error
+   - update updated_at
+
+Bear title must not be changed until raw artifact creation or adoption and DB export commit both succeed.
+
+exported_at must be set at most once per bear_id in normal operation, except for crash-recovery adoption of a pre-existing valid raw file as defined in raw file write semantics.
+
+The intended invariant is:
+- one raw file per bear_id
+- one successful export state transition per bear_id
+- later runs may still perform Bear marker repair or wiki integration
+
+11.4 Per-note commit behavior
+Each note is committed individually.
+No giant transaction across the full batch.
+
+12. Retry and failure policy
+
+12.1 Per-run retry count
+For export writes, marker writes, and wiki integration:
+- try up to 3 times within a run
+- if a stage succeeds, continue normally
+- if all 3 tries fail, count that as one failed run for that stage family
+
+12.2 Export failure threshold
+If export fails for 3 runs total:
+- export_attempts >= 3
+- exported_at IS NULL
+
+Then the note is excluded from default automatic export retries.
+
+12.3 Integration failure threshold
+If integration fails for 3 runs total:
+- integrate_attempts >= 3
+- integrated_at IS NULL
+
+Then the note is excluded from default automatic integration retries.
+
+12.4 Marker failure semantics
+Marker failure is best-effort and does not invalidate export success.
+
+If:
+- raw artifact exists
+- exported_at IS NOT NULL
+- marker update still fails after 3 tries in the run
+
+Then:
+- leave bear_marked_at = NULL
+- set last_error
+- log failure
+- next run may retry marker repair
+
+If a note already has exported_at IS NOT NULL and bear_marked_at IS NULL, future normal runs may retry marker repair if that behavior is enabled by the script's normal eligibility logic. The --repair-markers flag restricts execution to this repair class only.
+
+12.5 Clearing last_error
+Because last_error is shared across stages, use this coarse but consistent rule:
+- clear last_error on successful export commit
+- clear last_error on successful marker commit
+- clear last_error on successful integration commit
+
+JSONL remains the authoritative error history.
+
+13. CLI semantics
+
+Supported flags
+- --debug
+- --dry-run
+- --limit N
+- --retry-failed
+- --repair-markers
+
+--retry-failed
+Include notes whose relevant stage has previously reached the automatic retry threshold.
+
+Rules:
+- by default, rows with attempts >= 3 and no success timestamp for that stage are skipped
+- with --retry-failed, those rows are included again for that stage
+- counters are not reset automatically
+- if the run fails again, the relevant attempts counter increments again
+- marker-repair-only cases are controlled by --repair-markers, not by --retry-failed
+
+--repair-markers
+When --repair-markers is set:
+- process only notes where:
+  - exported_at IS NOT NULL
+  - bear_marked_at IS NULL
+- do not perform normal export or wiki integration for other notes in that mode
+
+14. Orchestrator handoff contract
+
+The handoff between bear_ingest.py and ingest_raw_notes.py must be machine-readable and not depend on parsing human-oriented stdout.
+
+Recommended v1.1 contract:
+- bear_ingest.py returns structured JSON containing the list of newly exported raw paths and their bear_ids
+- run_vault_pipeline.py consumes that structured result directly
+
+Suggested shape:
+{
+  "new_exports": [
+    {"bear_id": "123", "raw_path": "raw/gym-plan-123.md"}
+  ]
+}
+
+If the scripts are implemented as imported Python functions rather than subprocesses, the same structure should be used as the in-process return value.
+
+15. State model
+
+Not discovered
+No DB row exists.
+
+Empty and deleted
+No DB row exists.
+Durable trace exists only in JSONL as empty_deleted.
+
+Blank body, title-only capture
+- row exists
+- exported_at IS NOT NULL after successful export
+- raw artifact contains the normal synthetic heading even when the source body was blank
+
+Discovered but not exported
+- row exists
+- exported_at IS NULL
+- below retry threshold unless manually retried
+
+Export recovery-needed
+- row exists
+- exported_at IS NOT NULL
+- bear_marked_at IS NULL
+
+Exported and marker-fixed, pending wiki integration
+- exported_at IS NOT NULL
+- integrated_at IS NULL
+
+Export permanently failed under default policy
+- exported_at IS NULL
+- export_attempts >= 3
+
+Integration permanently failed under default policy
+- integrated_at IS NULL
+- integrate_attempts >= 3
+
+Fully done for v1.1
+- exported_at IS NOT NULL
+- integrated_at IS NOT NULL
+
+16. Wiki-link policy for now
+
+For now:
+- default to one-way links only
+- do not mutate existing pages just to create reciprocal symmetry
+- test discoverability during bootstrap and actual use
+- revisit later if the LLM consistently misses important connections
+
+This decision is intentionally deferred pending real-world testing.
+
+17. What v1.1 explicitly does not do
+
+v1.1 does not:
+- scan all of raw/ on every run
+- treat Bear markers as the canonical source of truth
+- auto-rebuild SQLite from raw files
+- re-export based on later Bear edits
+- fetch URL metadata during Bear export
+- auto-create bidirectional wiki links
+- rely on human-readable stdout between scripts
+- use event sourcing as the primary state model
+
+18. Recommended implementation order
+
+1. create SQLite schema
+2. confirm Bear DB read and title-write queries
+3. implement timestamp, path, and title normalization helpers
+4. implement atomic raw writer and existing-file adoption logic
+5. implement bear_ingest.py
+   - discovery
+   - empty deletion
+   - export
+   - DB writes
+   - marker writes
+   - JSONL logging
+6. implement ingest_raw_notes.py
+7. implement run_vault_pipeline.py as direct Python orchestrator
+8. test crash windows:
+   - raw write interrupted
+   - file exists, DB missing export
+   - export committed, marker missing
+   - integration fails repeatedly
+9. test discoverability of one-way links during bootstrap usage
+
+19. Short summary
+
+This v1.1 spec keeps the original architecture and tightens the dangerous semantics:
+- atomic raw writes are required
+- pre-existing raw files are handled as recoverable partial success when valid
+- marker repair uses the current Bear title, not stale DB metadata
+- raw_path and timestamps are normalized
+- last_error is explicitly lossy
+- empty-note deletion is audited in JSONL
+- retry flags are defined precisely
+- orchestrator handoff is machine-native
+
+This is ready to build from.
