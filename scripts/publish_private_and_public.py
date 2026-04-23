@@ -49,7 +49,7 @@ def commit_and_push(repo: Path, message: str) -> None:
         return
     run_git(repo, "add", "-A")
     run_git(repo, "commit", "-m", message)
-    run_git(repo, "push")
+    run_git(repo, "push", "-u", "origin", "HEAD")
 
 
 def ensure_git_repo(repo: Path) -> None:
