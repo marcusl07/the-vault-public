@@ -144,6 +144,111 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertEqual(decision.action, "heavy_update")
             self.assertEqual(decision.candidate_new_pages, ["brand-new-topic"])
 
+    def test_heavy_ingest_adds_open_question_and_review_for_contradiction_risk(self) -> None:
+        with isolated_env() as (_, raw_root, wiki_root, _):
+            (wiki_root / "coffee-preferences.md").write_text(
+                "\n".join(
+                    [
+                        "# Coffee Preferences",
+                        "",
+                        "## Notes",
+                        "",
+                        "- Marcus prefers pourover over espresso at home.",
+                        "",
+                        "## Connections",
+                        "",
+                        "- [[coffee]]",
+                        "",
+                        "## Sources",
+                        "",
+                        "- [Local note](../raw/coffee-source.md)",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (wiki_root / "coffee.md").write_text(
+                "\n".join(
+                    [
+                        "# Coffee",
+                        "",
+                        "## Connections",
+                        "",
+                        "- [[coffee-preferences]]",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            raw_path = raw_root / "life" / "coffee" / "home" / "coffee-preferences-123.md"
+            raw_path.parent.mkdir(parents=True)
+            raw_path.write_text(
+                vp.render_note(
+                    {
+                        "capture_id": "123",
+                        "source_kind": "capture",
+                        "source_id": "capture:123",
+                        "title": "Coffee Preferences",
+                        "created_at": "2026-04-24T10:00:00Z",
+                        "source_file": "Coffee Preferences.md",
+                    },
+                    "# Coffee Preferences\n\nMarcus prefers espresso over pourover at home.",
+                ),
+                encoding="utf-8",
+            )
+
+            outcome = vp._upsert_wiki_pages_for_note(
+                frontmatter=vp.parse_raw_note(raw_path)[0],
+                title="Coffee Preferences",
+                body="Marcus prefers espresso over pourover at home.",
+                raw_path=raw_path,
+            )
+
+            self.assertEqual(outcome.router_decision.action, "heavy_update")
+            self.assertTrue(outcome.review_queued)
+            page_text = (wiki_root / "coffee-preferences.md").read_text(encoding="utf-8")
+            self.assertIn("## Open Questions", page_text)
+            self.assertIn("Potential contradiction after", page_text)
+            review_text = (wiki_root / "review.md").read_text(encoding="utf-8")
+            self.assertIn("heavy-update contradiction", review_text)
+            log_text = (wiki_root / "log.md").read_text(encoding="utf-8")
+            self.assertIn('ingest | Capture: "Coffee Preferences" | Router: heavy_update', log_text)
+
+    def test_heavy_ingest_budget_defers_extra_pages_and_logs_deferral(self) -> None:
+        with isolated_env() as (_, raw_root, wiki_root, _):
+            raw_path = raw_root / "a" / "b" / "c" / "d" / "e" / "budgeted-note-123.md"
+            raw_path.parent.mkdir(parents=True)
+            raw_path.write_text(
+                vp.render_note(
+                    {
+                        "capture_id": "123",
+                        "source_kind": "capture",
+                        "source_id": "capture:123",
+                        "title": "Budgeted Note",
+                        "created_at": "2026-04-24T10:00:00Z",
+                        "source_file": "Budgeted Note.md",
+                    },
+                    "# Budgeted Note\n\nMarcus prefers a smaller, bounded maintenance budget.",
+                ),
+                encoding="utf-8",
+            )
+
+            outcome = vp._upsert_wiki_pages_for_note(
+                frontmatter=vp.parse_raw_note(raw_path)[0],
+                title="Budgeted Note",
+                body="Marcus prefers a smaller, bounded maintenance budget.",
+                raw_path=raw_path,
+                budget=vp.MaintenanceBudget(max_candidate_pages=2, max_context_chars=1_200, max_pages_rewritten=2),
+            )
+
+            self.assertEqual(outcome.router_decision.action, "heavy_update")
+            self.assertTrue(outcome.deferred_items)
+            self.assertTrue(outcome.review_queued)
+            review_text = (wiki_root / "review.md").read_text(encoding="utf-8")
+            self.assertIn("heavy-update deferred work", review_text)
+            log_text = (wiki_root / "log.md").read_text(encoding="utf-8")
+            self.assertIn('ingest | Capture: "Budgeted Note" | Router: heavy_update | Deferred:', log_text)
+
     def test_query_writeback_chat_fact_persists_artifact_updates_page_and_logs_query(self) -> None:
         with isolated_env() as (root, _, wiki_root, _):
             result = vp.query_writeback_chat_fact(
