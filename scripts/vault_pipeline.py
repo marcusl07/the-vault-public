@@ -803,13 +803,21 @@ def _build_default_page_assignments(title: str, body: str, raw_abspath: Path) ->
 
 def _default_source_record(title: str, body: str, raw_path: Path) -> bw.SourceRecord:
     url = bw.extract_first_url(body)
-    source_status = "fetch_skipped" if url else "local_only"
+    fetched_summary = None
+    source_status = "local_only"
+    if url:
+        if bw.is_google_search_url(url):
+            source_status = "fetch_skipped"
+        else:
+            fetch_result = bw.fetch_url_summary(url)
+            fetched_summary = fetch_result.summary
+            source_status = fetch_result.status
     return bw.prepare_source_record(
         source_label=title,
         source_path="../" + raw_path.relative_to(ROOT).as_posix(),
         source_status=source_status,
         raw_content=body,
-        fetched_summary=None,
+        fetched_summary=fetched_summary,
         detected_url=url,
     )
 

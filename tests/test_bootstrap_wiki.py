@@ -354,6 +354,35 @@ class BootstrapWikiTests(unittest.TestCase):
         self.assertNotIn("No sources linked yet", rendered)
         self.assertNotIn("unclassified-media-captures", rendered)
 
+    def test_render_source_lines_prefers_literal_detected_url(self) -> None:
+        source = bw.SourceRecord(
+            label="Chocolate Cake",
+            path="../raw/chocolate-cake.md",
+            status="local_only",
+            raw_content="",
+            cleaned_text="Cake recipe.",
+            fetched_summary=None,
+            detected_url="https://example.com/cake",
+        )
+        page = bw.Page(
+            slug="chocolate-cake",
+            title="Chocolate Cake",
+            page_type="Concepts",
+            summary_hint="Chocolate Cake",
+            sources={source.path: source},
+        )
+
+        self.assertEqual(
+            bw.render_source_lines(page),
+            ["- [https://example.com/cake](../raw/chocolate-cake.md)"],
+        )
+
+    def test_parse_source_line_restores_detected_url_from_literal_label(self) -> None:
+        parsed = bw.parse_source_line("- [https://example.com/cake](../raw/chocolate-cake.md)")
+
+        assert parsed is not None
+        self.assertEqual(parsed.detected_url, "https://example.com/cake")
+
     def test_atomic_page_with_only_notes_and_link_omits_sources(self) -> None:
         page = bw.Page(
             slug="example",
@@ -599,6 +628,102 @@ class BootstrapWikiTests(unittest.TestCase):
         self.assertFalse(decision.is_atomic)
         self.assertEqual(decision.candidate_satellite_slugs, ["iterators", "generators"])
         self.assertEqual(decision.candidate_evaluations[0].slug, "iterators")
+
+    def test_apply_split_decision_reuses_single_source_across_grounded_children(self) -> None:
+        source = bw.SourceRecord(
+            label="ICS 33 Iterators and Generators",
+            path="../raw/ics33-week1.md",
+            status="local_only",
+            raw_content="",
+            cleaned_text="Iterators define traversal. Generators use yield to produce values lazily.",
+            fetched_summary=None,
+            detected_url=None,
+        )
+        pages = {
+            "lazy-sequences": bw.Page(
+                slug="lazy-sequences",
+                title="Lazy Sequences",
+                page_type="Concepts",
+                summary_hint="Lazy Sequences",
+                sources={source.path: source},
+            )
+        }
+        decision = bw.PageSplitDecision(
+            is_atomic=False,
+            candidate_satellite_slugs=["iterators", "generators"],
+            candidate_evaluations=[
+                bw.SplitCandidateEvaluation(
+                    slug="iterators",
+                    accepted=True,
+                    grounding=["Iterator protocol and traversal state."],
+                    why_distinct="Consumer-facing traversal interface.",
+                    passes_direct_link_test=True,
+                    passes_stable_page_test=True,
+                ),
+                bw.SplitCandidateEvaluation(
+                    slug="generators",
+                    accepted=True,
+                    grounding=["Yield-based lazy value production."],
+                    why_distinct="Producer-side lazy sequence construction.",
+                    passes_direct_link_test=True,
+                    passes_stable_page_test=True,
+                ),
+            ],
+        )
+
+        applied = bw.apply_split_decision(pages, "lazy-sequences", decision, seed_kind="ingest", allow_partial_source_coverage=True)
+
+        self.assertTrue(applied)
+        self.assertIn(source.path, pages["iterators"].sources)
+        self.assertIn(source.path, pages["generators"].sources)
+
+    def test_apply_split_decision_skips_incidental_single_source_reuse(self) -> None:
+        source = bw.SourceRecord(
+            label="ICS 33 Iterators and Generators",
+            path="../raw/ics33-week1.md",
+            status="local_only",
+            raw_content="",
+            cleaned_text="Iterators define traversal. Generators use yield to produce values lazily.",
+            fetched_summary=None,
+            detected_url=None,
+        )
+        pages = {
+            "lazy-sequences": bw.Page(
+                slug="lazy-sequences",
+                title="Lazy Sequences",
+                page_type="Concepts",
+                summary_hint="Lazy Sequences",
+                sources={source.path: source},
+            )
+        }
+        decision = bw.PageSplitDecision(
+            is_atomic=False,
+            candidate_satellite_slugs=["iterators", "searching"],
+            candidate_evaluations=[
+                bw.SplitCandidateEvaluation(
+                    slug="iterators",
+                    accepted=True,
+                    grounding=["Iterator protocol and traversal state."],
+                    why_distinct="Consumer-facing traversal interface.",
+                    passes_direct_link_test=True,
+                    passes_stable_page_test=True,
+                ),
+                bw.SplitCandidateEvaluation(
+                    slug="searching",
+                    accepted=True,
+                    grounding=[],
+                    why_distinct="Only a passing mention in the lecture note.",
+                    passes_direct_link_test=True,
+                    passes_stable_page_test=True,
+                ),
+            ],
+        )
+
+        applied = bw.apply_split_decision(pages, "lazy-sequences", decision, seed_kind="ingest", allow_partial_source_coverage=True)
+
+        self.assertTrue(applied)
+        self.assertIn(source.path, pages["iterators"].sources)
+        self.assertNotIn(source.path, pages["searching"].sources)
 
     def test_split_debug_output_includes_grounding_and_rejection_reasons(self) -> None:
         sources = [

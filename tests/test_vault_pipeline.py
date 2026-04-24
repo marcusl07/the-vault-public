@@ -424,6 +424,104 @@ class VaultPipelineTests(unittest.TestCase):
             event = json.loads(vp.JSONL_LOG_PATH.read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual(event["event"], "integrated")
 
+    def test_ingest_reuses_single_raw_source_across_grounded_split_children(self) -> None:
+        with isolated_env() as (_, raw_root, wiki_root, _):
+            raw_path = raw_root / "ics33-week1.md"
+            raw_path.write_text(
+                vp.render_raw_file(
+                    capture_id="123",
+                    title="Lazy Sequences",
+                    created_at="2026-04-20T17:32:00Z",
+                    source_file="Lazy Sequences.md",
+                    body="Iterators define traversal. Generators use yield to produce values lazily.",
+                ),
+                encoding="utf-8",
+            )
+
+            decision = vp.bw.PageSplitDecision(
+                is_atomic=False,
+                candidate_satellite_slugs=["iterators", "generators"],
+                candidate_evaluations=[
+                    vp.bw.SplitCandidateEvaluation(
+                        slug="iterators",
+                        accepted=True,
+                        grounding=["Iterator protocol and traversal state."],
+                        why_distinct="Consumer-facing traversal interface.",
+                        passes_direct_link_test=True,
+                        passes_stable_page_test=True,
+                    ),
+                    vp.bw.SplitCandidateEvaluation(
+                        slug="generators",
+                        accepted=True,
+                        grounding=["Yield-based lazy value production."],
+                        why_distinct="Producer-side lazy sequence construction.",
+                        passes_direct_link_test=True,
+                        passes_stable_page_test=True,
+                    ),
+                ],
+            )
+
+            with mock.patch.object(vp, "_resolve_synthesis_config", return_value=("token", "gemini-test")):
+                with mock.patch.object(vp.bw, "analyze_page_for_atomic_split", return_value=decision):
+                    result = vp.ingest_raw_notes([{"capture_id": "123", "raw_path": "raw/ics33-week1.md"}])
+
+            self.assertEqual(result["integrated"], [{"capture_id": "123", "raw_path": "raw/ics33-week1.md"}])
+            iterators_page = (wiki_root / "iterators.md").read_text(encoding="utf-8")
+            generators_page = (wiki_root / "generators.md").read_text(encoding="utf-8")
+            self.assertIn("(../raw/ics33-week1.md)", iterators_page)
+            self.assertIn("(../raw/ics33-week1.md)", generators_page)
+
+    def test_ingest_fetches_remote_summary_for_url_note_and_renders_literal_url_source(self) -> None:
+        with isolated_env() as (_, raw_root, wiki_root, _):
+            raw_path = raw_root / "chocolate-cake-123.md"
+            raw_path.write_text(
+                vp.render_raw_file(
+                    capture_id="123",
+                    title="Chocolate Cake",
+                    created_at="2026-04-20T17:32:00Z",
+                    source_file="Chocolate Cake.md",
+                    body="https://example.com/cake\n\nmy short note",
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(
+                vp.bw,
+                "fetch_url_summary",
+                return_value=vp.bw.FetchResult("Chocolate Cake Recipe — Rich and easy.", "fetched"),
+            ) as fetch_mock:
+                result = vp.ingest_raw_notes([{"capture_id": "123", "raw_path": "raw/chocolate-cake-123.md"}])
+
+            self.assertEqual(result["integrated"], [{"capture_id": "123", "raw_path": "raw/chocolate-cake-123.md"}])
+            fetch_mock.assert_called_once_with("https://example.com/cake")
+            page_text = (wiki_root / "chocolate-cake.md").read_text(encoding="utf-8")
+            self.assertIn("Chocolate Cake Recipe — Rich and easy.", page_text)
+            self.assertIn("my short note", page_text)
+            self.assertIn("- [https://example.com/cake](../raw/chocolate-cake-123.md)", page_text)
+
+    def test_ingest_skips_google_search_fetch_but_preserves_literal_url_source(self) -> None:
+        with isolated_env() as (_, raw_root, wiki_root, _):
+            raw_path = raw_root / "search-123.md"
+            raw_path.write_text(
+                vp.render_raw_file(
+                    capture_id="123",
+                    title="Cake Search",
+                    created_at="2026-04-20T17:32:00Z",
+                    source_file="Cake Search.md",
+                    body="https://www.google.com/search?q=chocolate+cake\n\nlook at later",
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(vp.bw, "fetch_url_summary") as fetch_mock:
+                result = vp.ingest_raw_notes([{"capture_id": "123", "raw_path": "raw/search-123.md"}])
+
+            self.assertEqual(result["integrated"], [{"capture_id": "123", "raw_path": "raw/search-123.md"}])
+            fetch_mock.assert_not_called()
+            page_text = (wiki_root / "cake-search.md").read_text(encoding="utf-8")
+            self.assertIn("look at later", page_text)
+            self.assertIn("- [https://www.google.com/search?q=chocolate+cake](../raw/search-123.md)", page_text)
+
     def test_page_resynthesis_on_touch_rewrites_existing_page_with_shared_atomic_shape(self) -> None:
         with isolated_env() as (_, raw_root, wiki_root, _):
             existing_page = wiki_root / "topic-a.md"
