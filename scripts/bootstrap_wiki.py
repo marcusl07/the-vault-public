@@ -142,6 +142,8 @@ PAGE_SPLIT_MAX_BODY_CHARS = 6_000
 PAGE_SHAPE_ATOMIC = "atomic"
 PAGE_SHAPE_TOPIC = "topic"
 INDEX_SECTION_ORDER = ("Concepts", "Entities", "Experiences", "Aspirations")
+CATALOG_PATH = "catalog.md"
+HIGH_SIGNAL_INBOUND_THRESHOLD = 3
 SOURCE_LINE_RE = re.compile(r"^- \[(?P<label>[^\]]+)\]\((?P<path>[^)]+)\)(?P<suffix>.*)$")
 CONNECTION_SLUG_RE = re.compile(r"\[\[(?P<slug>[^\]]+)\]\]")
 BOLD_HEADING_RE = re.compile(r"^[-*+]\s*\*\*(.+?)\*\*\s*$")
@@ -174,6 +176,12 @@ class SourceRecord:
     cleaned_text: str
     fetched_summary: str | None
     detected_url: str | None
+    source_kind: str = "capture"
+    source_id: str | None = None
+    created_at: str | None = None
+    title: str | None = None
+    external_url: str | None = None
+    provenance_pointer: str | None = None
     tags: set[str] = field(default_factory=set)
     excluded_from_body: bool = False
 
@@ -191,6 +199,7 @@ class Page:
     seed_kinds: set[str] = field(default_factory=set)
     rendered_summary: str | None = None
     rendered_notes_markdown: str | None = None
+    open_questions: list[str] = field(default_factory=list)
     topic_parent: str | None = None
 
 
@@ -202,6 +211,7 @@ class ParsedWikiPage:
     shape: str
     summary_lines: list[str] = field(default_factory=list)
     note_lines: list[str] = field(default_factory=list)
+    open_question_lines: list[str] = field(default_factory=list)
     connection_slugs: list[str] = field(default_factory=list)
     sources: dict[str, SourceRecord] = field(default_factory=dict)
 
@@ -386,6 +396,12 @@ def source_record_to_cache_dict(source: SourceRecord) -> dict[str, object]:
         "cleaned_text": source.cleaned_text,
         "fetched_summary": source.fetched_summary,
         "detected_url": source.detected_url,
+        "source_kind": source.source_kind,
+        "source_id": source.source_id,
+        "created_at": source.created_at,
+        "title": source.title,
+        "external_url": source.external_url,
+        "provenance_pointer": source.provenance_pointer,
         "tags": sorted(source.tags),
         "excluded_from_body": source.excluded_from_body,
     }
@@ -400,6 +416,14 @@ def source_record_from_cache_dict(payload: dict[str, object]) -> SourceRecord:
         cleaned_text=str(payload.get("cleaned_text", "")),
         fetched_summary=str(payload["fetched_summary"]) if payload.get("fetched_summary") is not None else None,
         detected_url=str(payload["detected_url"]) if payload.get("detected_url") is not None else None,
+        source_kind=str(payload.get("source_kind", "capture")),
+        source_id=str(payload["source_id"]) if payload.get("source_id") is not None else None,
+        created_at=str(payload["created_at"]) if payload.get("created_at") is not None else None,
+        title=str(payload["title"]) if payload.get("title") is not None else None,
+        external_url=str(payload["external_url"]) if payload.get("external_url") is not None else None,
+        provenance_pointer=(
+            str(payload["provenance_pointer"]) if payload.get("provenance_pointer") is not None else None
+        ),
         tags=set(str(tag) for tag in payload.get("tags", [])),
         excluded_from_body=bool(payload.get("excluded_from_body", False)),
     )
@@ -727,6 +751,12 @@ def prepare_source_record(
     raw_content: str,
     fetched_summary: str | None,
     detected_url: str | None,
+    source_kind: str = "capture",
+    source_id: str | None = None,
+    created_at: str | None = None,
+    title: str | None = None,
+    external_url: str | None = None,
+    provenance_pointer: str | None = None,
 ) -> SourceRecord:
     cleaned_text = clean_source_text(raw_content, source_label)
     tags = detect_source_tags(source_label, cleaned_text, detected_url, fetched_summary)
@@ -738,6 +768,12 @@ def prepare_source_record(
         cleaned_text=cleaned_text,
         fetched_summary=fetched_summary,
         detected_url=detected_url,
+        source_kind=source_kind,
+        source_id=source_id,
+        created_at=created_at,
+        title=title or source_label,
+        external_url=external_url or detected_url,
+        provenance_pointer=provenance_pointer,
         tags=tags,
         excluded_from_body=should_exclude_from_body(tags),
     )
@@ -878,6 +914,7 @@ def stage_rendered_wiki(
         atomic_write_text(target, render_page(page))
 
     atomic_write_text(RENDER_STAGE_ROOT / "index.md", render_index(pages))
+    atomic_write_text(RENDER_STAGE_ROOT / CATALOG_PATH, render_catalog(pages))
 
     existing_lines = [
         line
@@ -1741,10 +1778,15 @@ def should_fold_note_into_parent(title: str, content: str, url: str | None) -> b
 
 def derive_path_topics(path: Path) -> list[str]:
     topics: list[str] = []
-    if APPLE_NOTES_ROOT in path.parents:
-        relative_parts = path.relative_to(APPLE_NOTES_ROOT).parts[:-1]
+    path_abs = Path(os.path.abspath(path))
+    apple_root_abs = Path(os.path.abspath(APPLE_NOTES_ROOT))
+    raw_root_abs = Path(os.path.abspath(RAW_ROOT))
+    if Path(os.path.commonpath([apple_root_abs, path_abs])) == apple_root_abs:
+        relative_parts = Path(os.path.relpath(path_abs, apple_root_abs)).parts[:-1]
+    elif Path(os.path.commonpath([raw_root_abs, path_abs])) == raw_root_abs:
+        relative_parts = Path(os.path.relpath(path_abs, raw_root_abs)).parts[:-1]
     else:
-        relative_parts = path.relative_to(RAW_ROOT).parts[:-1]
+        relative_parts = path.parts[:-1]
     for component in reversed(relative_parts):
         topic = clean_component(component)
         if topic and topic not in topics:
@@ -1805,6 +1847,9 @@ def parse_source_line(line: str, retained_evidence: str = "") -> SourceRecord | 
         cleaned_text=retained_evidence,
         fetched_summary=None,
         detected_url=label if label.startswith(("http://", "https://")) else None,
+        source_kind="chat" if match.group("path").startswith("../sources/chat/") else "capture",
+        title=label,
+        external_url=label if label.startswith(("http://", "https://")) else None,
     )
 
 
@@ -1849,7 +1894,7 @@ def render_source_lines(page: Page) -> list[str]:
     }
     for source_path in sorted(page.sources):
         source = page.sources[source_path]
-        visible_label = source.detected_url or source.label
+        visible_label = source.external_url or source.detected_url or source.label
         lines.append(f"- [{visible_label}]({source_path}){suffix_map.get(source.status, '')}")
     return lines
 
@@ -1904,16 +1949,57 @@ def page_index_summary(page: Page) -> str:
     return f"{source_count} source{'' if source_count == 1 else 's'}"
 
 
+def inbound_link_counts(pages: dict[str, Page]) -> Counter:
+    counts: Counter = Counter()
+    known_slugs = set(pages)
+    for page in pages.values():
+        for slug in sorted_connection_slugs(page, limit=None):
+            if slug in known_slugs:
+                counts[slug] += 1
+    return counts
+
+
+def render_catalog(pages: dict[str, Page]) -> str:
+    grouped: defaultdict[str, list[Page]] = defaultdict(list)
+    for page in pages.values():
+        if page.slug in {"index", "log", Path(CATALOG_PATH).stem}:
+            continue
+        grouped[page.page_type].append(page)
+
+    lines = [
+        "# Wiki Catalog",
+        "",
+        f"_Last updated: {TODAY} — {len(pages)} pages_",
+        "",
+    ]
+
+    for section in INDEX_SECTION_ORDER:
+        lines.append(f"## {section}")
+        section_pages = sorted(grouped.get(section, []), key=lambda page: page.title.lower())
+        if not section_pages:
+            lines.append("- None yet.")
+            lines.append("")
+            continue
+        for page in section_pages:
+            lines.append(f"- [[{page.slug}]] — {page_index_summary(page)}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def parse_page_file(path: Path, page_type: str | None = None) -> ParsedWikiPage:
     text = path.read_text(encoding="utf-8") if path.exists() else ""
     lines = text.splitlines()
     slug = path.stem
     title = lines[0][2:].strip() if lines and lines[0].startswith("# ") else page_title(slug)
-    sections: dict[str, list[str]] = {"summary": [], "notes": [], "connections": [], "sources": []}
+    sections: dict[str, list[str]] = {"summary": [], "notes": [], "connections": [], "sources": [], "open_questions": []}
     current = "summary"
     for line in lines[1:]:
         if line == "## Notes":
             current = "notes"
+            continue
+        if line == "## Open Questions":
+            current = "open_questions"
             continue
         if line == "## Connections":
             current = "connections"
@@ -1933,6 +2019,7 @@ def parse_page_file(path: Path, page_type: str | None = None) -> ParsedWikiPage:
     connection_slugs = extract_connection_slugs([line for line in sections["connections"] if line.strip()])
     summary_lines = [line for line in sections["summary"] if line.strip()]
     note_lines = [line for line in sections["notes"] if line.strip()]
+    open_question_lines = [line for line in sections["open_questions"] if line.strip()]
     inferred_shape = PAGE_SHAPE_TOPIC if (not note_lines and not sources and connection_slugs) else PAGE_SHAPE_ATOMIC
 
     return ParsedWikiPage(
@@ -1942,6 +2029,7 @@ def parse_page_file(path: Path, page_type: str | None = None) -> ParsedWikiPage:
         shape=inferred_shape,
         summary_lines=summary_lines,
         note_lines=note_lines,
+        open_question_lines=open_question_lines,
         connection_slugs=connection_slugs,
         sources=sources,
     )
@@ -1958,6 +2046,7 @@ def parsed_page_to_page(parsed: ParsedWikiPage) -> Page:
     page.notes = parse_note_snippets(parsed.note_lines)
     if parsed.note_lines:
         page.rendered_notes_markdown = "\n".join(parsed.note_lines).strip()
+    page.open_questions = parse_note_snippets(parsed.open_question_lines)
     for source_path, source in parsed.sources.items():
         page.sources[source_path] = source
     for other in parsed.connection_slugs:
@@ -1983,13 +2072,20 @@ def load_existing_page_types(index_path: Path) -> dict[str, str]:
     return page_types
 
 
+def load_page_types() -> dict[str, str]:
+    catalog_path = WIKI_ROOT / CATALOG_PATH
+    if catalog_path.exists():
+        return load_existing_page_types(catalog_path)
+    return load_existing_page_types(WIKI_ROOT / "index.md")
+
+
 def load_existing_wiki_pages() -> dict[str, ParsedWikiPage]:
-    page_types = load_existing_page_types(WIKI_ROOT / "index.md")
+    page_types = load_page_types()
     parsed_pages: dict[str, ParsedWikiPage] = {}
     if not WIKI_ROOT.exists():
         return parsed_pages
     for path in sorted(WIKI_ROOT.glob("*.md")):
-        if path.stem in {"index", "log"}:
+        if path.stem in {"index", "log", Path(CATALOG_PATH).stem}:
             continue
         parsed = parse_page_file(path, page_type=page_types.get(path.stem))
         parsed_pages[parsed.slug] = parsed
@@ -2002,6 +2098,9 @@ def merge_page_content(target: Page, source_page: Page) -> None:
     for note in source_page.notes:
         if note not in target.notes:
             target.notes.append(note)
+    for question in source_page.open_questions:
+        if question not in target.open_questions:
+            target.open_questions.append(question)
     if not target.rendered_notes_markdown and source_page.rendered_notes_markdown:
         target.rendered_notes_markdown = source_page.rendered_notes_markdown
     for source_path, source in source_page.sources.items():
@@ -2423,12 +2522,18 @@ def maybe_apply_query_time_split_fix(
         changed_page_slugs.append(slug)
 
     rendered_index = render_index(pages)
+    rendered_catalog = render_catalog(pages)
+    catalog_path = WIKI_ROOT / CATALOG_PATH
+    before_catalog_text = catalog_path.read_text(encoding="utf-8") if catalog_path.exists() else None
     index_changed = before_index_text != rendered_index
+    catalog_changed = before_catalog_text != rendered_catalog
     if not changed_page_slugs:
         return False
 
     if index_changed:
         atomic_write_text(index_path, rendered_index)
+    if catalog_changed:
+        atomic_write_text(catalog_path, rendered_catalog)
 
     append_wiki_query_log(f"{mutation_note} — {parent_slug} -> {', '.join(child_slugs[:8])}")
     return True
@@ -2693,10 +2798,12 @@ def finalize_page_shapes(pages: dict[str, Page]) -> None:
             page.shape = PAGE_SHAPE_TOPIC
             page.notes = []
             page.rendered_notes_markdown = None
+            page.open_questions = []
             page.sources = {}
         else:
             page.shape = PAGE_SHAPE_ATOMIC
             page.notes = ordered_unique(page.notes)
+            page.open_questions = ordered_unique(page.open_questions)
             page.rendered_notes_markdown = build_simple_notes_markdown(page) or None
 
 
@@ -2744,7 +2851,40 @@ def ensure_supporting_pages(pages: dict[str, Page], slug: str, original_title: s
     ).seed_kinds.add(seed_kind)
 
 
+def normalize_page(page: Page) -> Page:
+    page.connections = Counter({slug: count for slug, count in page.connections.items() if slug and slug != page.slug})
+    if page_shape(page) == PAGE_SHAPE_TOPIC:
+        page.shape = PAGE_SHAPE_TOPIC
+        page.notes = []
+        page.rendered_notes_markdown = None
+        page.open_questions = []
+        page.sources = {}
+    else:
+        page.shape = PAGE_SHAPE_ATOMIC
+        page.notes = ordered_unique([note.strip() for note in page.notes if note.strip()])
+        page.open_questions = ordered_unique([question.strip() for question in page.open_questions if question.strip()])
+        page.rendered_notes_markdown = build_simple_notes_markdown(page) or None
+    return page
+
+
+def validate_page(page: Page, *, allow_missing_outbound: bool = False) -> list[str]:
+    issues: list[str] = []
+    if page_shape(page) == PAGE_SHAPE_TOPIC:
+        if page.notes or page.rendered_notes_markdown:
+            issues.append("topic-pages-cannot-have-notes")
+        if page.open_questions:
+            issues.append("topic-pages-cannot-have-open-questions")
+        if page.sources:
+            issues.append("topic-pages-cannot-have-sources")
+    else:
+        normalized = normalize_page(page)
+        if not allow_missing_outbound and not sorted_connection_slugs(normalized, limit=None):
+            issues.append("atomic-pages-must-have-outbound-links")
+    return issues
+
+
 def render_page(page: Page) -> str:
+    page = normalize_page(page)
     lines = [f"# {page.title}", ""]
 
     connection_lines = render_connection_lines(page)
@@ -2756,6 +2896,8 @@ def render_page(page: Page) -> str:
     note_lines = build_simple_notes_markdown(page)
     if note_lines.strip():
         lines.extend(["## Notes", "", note_lines, ""])
+    if page.open_questions:
+        lines.extend(["## Open Questions", "", "\n".join(f"- {question}" for question in page.open_questions), ""])
     if connection_lines:
         lines.extend(["## Connections", "", "\n".join(connection_lines), ""])
     source_lines = render_source_lines(page)
@@ -2765,16 +2907,19 @@ def render_page(page: Page) -> str:
 
 
 def render_index(pages: dict[str, Page]) -> str:
+    counts = inbound_link_counts(pages)
     grouped: defaultdict[str, list[Page]] = defaultdict(list)
     for page in pages.values():
-        if page.slug in {"index", "log"}:
+        if page.slug in {"index", "log", Path(CATALOG_PATH).stem}:
             continue
-        grouped[page.page_type].append(page)
+        if page_shape(page) == PAGE_SHAPE_TOPIC or counts.get(page.slug, 0) >= HIGH_SIGNAL_INBOUND_THRESHOLD:
+            grouped[page.page_type].append(page)
 
     lines = [
         "# Wiki Index",
         "",
         f"_Last updated: {TODAY} — {len(pages)} pages_",
+        "_Navigation only: topic pages plus high-signal atomic pages. Use [[catalog]] for exhaustive lookup._",
         "",
     ]
 

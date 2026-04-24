@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import errno
 import fcntl
@@ -24,6 +24,8 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution path
 
 ROOT = Path(__file__).resolve().parent.parent
 RAW_ROOT = ROOT / "raw"
+SOURCES_ROOT = ROOT / "sources"
+CHAT_SOURCES_ROOT = SOURCES_ROOT / "chat"
 WIKI_ROOT = ROOT / "wiki"
 JSONL_LOG_PATH = ROOT / "log.jsonl"
 DEFAULT_CAPTURE_ROOT = Path(
@@ -39,10 +41,12 @@ _CONNECTION_SLUG_RE = re.compile(r"\[\[(?P<slug>[^\]]+)\]\]")
 
 
 def configure_workspace(root: Path, *, capture_root: Path | None = None) -> None:
-    global ROOT, RAW_ROOT, WIKI_ROOT, JSONL_LOG_PATH, DEFAULT_CAPTURE_ROOT
+    global ROOT, RAW_ROOT, SOURCES_ROOT, CHAT_SOURCES_ROOT, WIKI_ROOT, JSONL_LOG_PATH, DEFAULT_CAPTURE_ROOT
 
     ROOT = root
     RAW_ROOT = ROOT / "raw"
+    SOURCES_ROOT = ROOT / "sources"
+    CHAT_SOURCES_ROOT = SOURCES_ROOT / "chat"
     WIKI_ROOT = ROOT / "wiki"
     JSONL_LOG_PATH = ROOT / "log.jsonl"
     DEFAULT_CAPTURE_ROOT = capture_root or ROOT / "capture"
@@ -51,16 +55,26 @@ def configure_workspace(root: Path, *, capture_root: Path | None = None) -> None
 
 @contextmanager
 def temporary_workspace(root: Path, *, capture_root: Path | None = None) -> Iterator[None]:
-    original = (ROOT, RAW_ROOT, WIKI_ROOT, JSONL_LOG_PATH, DEFAULT_CAPTURE_ROOT)
+    original = (ROOT, RAW_ROOT, SOURCES_ROOT, CHAT_SOURCES_ROOT, WIKI_ROOT, JSONL_LOG_PATH, DEFAULT_CAPTURE_ROOT)
     configure_workspace(root, capture_root=capture_root)
     try:
         yield
     finally:
-        restored_root, restored_raw_root, restored_wiki_root, restored_log_path, restored_capture_root = original
+        (
+            restored_root,
+            restored_raw_root,
+            restored_sources_root,
+            restored_chat_sources_root,
+            restored_wiki_root,
+            restored_log_path,
+            restored_capture_root,
+        ) = original
         globals().update(
             {
                 "ROOT": restored_root,
                 "RAW_ROOT": restored_raw_root,
+                "SOURCES_ROOT": restored_sources_root,
+                "CHAT_SOURCES_ROOT": restored_chat_sources_root,
                 "WIKI_ROOT": restored_wiki_root,
                 "JSONL_LOG_PATH": restored_log_path,
                 "DEFAULT_CAPTURE_ROOT": restored_capture_root,
@@ -111,6 +125,34 @@ class PipelineOptions:
     retry_failed: bool = False
     capture_root: Path = DEFAULT_CAPTURE_ROOT
     page_resynthesis_on_touch: bool = False
+
+
+@dataclass(frozen=True)
+class RouterDecision:
+    action: str
+    target_pages: list[str]
+    new_page_signal: bool
+    candidate_new_pages: list[str]
+    contradiction_risk: str
+    reorganization_risk: bool
+    confidence: str
+    reason: str
+
+
+@dataclass
+class MaintenanceOutcome:
+    changed_slugs: list[str] = field(default_factory=list)
+    router_decision: RouterDecision | None = None
+
+
+@dataclass
+class QueryWritebackResult:
+    changed_slugs: list[str] = field(default_factory=list)
+    source_path: Path | None = None
+    router_decision: RouterDecision | None = None
+    review_queued: bool = False
+    superseded_source_paths: list[str] = field(default_factory=list)
+    duplicate_of_source_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -174,6 +216,10 @@ def raw_file_slug(title: str) -> str:
     collapsed = _DASH_RUN_RE.sub("-", sanitized).strip("-")
     trimmed = collapsed[:80].rstrip("-")
     return trimmed or "untitled"
+
+
+def stable_source_id(source_kind: str, identity: str) -> str:
+    return f"{source_kind}:{identity}"
 
 
 def debug_print(message: str, *, enabled: bool, stream: TextIO | None = None) -> None:
@@ -351,19 +397,33 @@ def render_raw_file(
     body: str,
     integrated_at: str | None = None,
 ) -> str:
+    external_url = bw.extract_first_url(body)
     frontmatter: dict[str, object] = {
         "capture_id": capture_id,
+        "source_kind": "capture",
+        "source_id": stable_source_id("capture", capture_id),
         "title": title,
         "created_at": created_at,
         "source_file": source_file,
     }
+    if external_url:
+        frontmatter["external_url"] = external_url
     if integrated_at:
         frontmatter["integrated_at"] = integrated_at
     return (
         render_note(
             frontmatter,
             f"# {title}\n\n{body}",
-            key_order=["capture_id", "title", "created_at", "source_file", "integrated_at"],
+            key_order=[
+                "capture_id",
+                "source_kind",
+                "source_id",
+                "title",
+                "created_at",
+                "external_url",
+                "source_file",
+                "integrated_at",
+            ],
         )
     )
 
@@ -376,6 +436,115 @@ def parse_raw_note(path: Path) -> tuple[dict[str, object], str]:
     if not body.strip():
         raise ValueError("raw file body is empty")
     return frontmatter, body
+
+
+def persist_chat_source_artifact(
+    *,
+    title: str,
+    body: str,
+    created_at: str,
+    conversation_ref: str,
+    external_url: str | None = None,
+    extra_frontmatter: dict[str, object] | None = None,
+) -> Path:
+    CHAT_SOURCES_ROOT.mkdir(parents=True, exist_ok=True)
+    identity = f"{created_at}:{title}:{body}"
+    source_id = stable_source_id("chat", uuid.uuid5(uuid.NAMESPACE_URL, identity).hex)
+    target = CHAT_SOURCES_ROOT / f"{raw_file_slug(title)}-{source_id.split(':', 1)[1]}.md"
+    if target.exists():
+        return target
+    frontmatter: dict[str, object] = {
+        "source_kind": "chat",
+        "source_id": source_id,
+        "title": title,
+        "created_at": created_at,
+        "provenance_pointer": conversation_ref,
+    }
+    if external_url:
+        frontmatter["external_url"] = external_url
+    if extra_frontmatter:
+        frontmatter.update(extra_frontmatter)
+    atomic_write_text(
+        target,
+        render_note(
+            frontmatter,
+            f"# {title}\n\n{body}",
+            key_order=[
+                "source_kind",
+                "source_id",
+                "title",
+                "created_at",
+                "external_url",
+                "provenance_pointer",
+                "target_page",
+                "target_note",
+                "fact_key",
+                "replacement_intent",
+            ],
+        ),
+    )
+    return target
+
+
+def _resolve_repo_relative_path(path: str) -> Path:
+    normalized = path[3:] if path.startswith("../") else path
+    resolved = (ROOT / normalized).resolve()
+    root_resolved = ROOT.resolve()
+    if Path(os.path.commonpath([root_resolved, resolved])) != root_resolved:
+        raise ValueError(f"path must stay within repo root: {path}")
+    return resolved
+
+
+def _source_excerpt(source: bw.SourceRecord) -> str:
+    excerpt = bw.compact_source_text(source, limit=220).strip()
+    return re.sub(r"\s+", " ", excerpt)
+
+
+def _remove_source_from_page(page: bw.Page, source_path: str) -> None:
+    source = page.sources.pop(source_path, None)
+    if source is None:
+        return
+    excerpt = _source_excerpt(source)
+    if excerpt:
+        page.notes = [note for note in page.notes if note != excerpt]
+
+
+def _append_review_backlog_item(
+    *,
+    reason: str,
+    affected_pages: list[str],
+    source_paths: list[str],
+    next_action: str,
+    status: str = "open",
+) -> None:
+    review_path = WIKI_ROOT / "review.md"
+    existing = review_path.read_text(encoding="utf-8") if review_path.exists() else "# Wiki Review Backlog\n"
+    page_links = ", ".join(f"[[{slug}]]" for slug in bw.ordered_unique(affected_pages)) or "None"
+    source_links = ", ".join(f"[{path}]({path})" for path in bw.ordered_unique(source_paths)) or "None"
+    entry = "\n".join(
+        [
+            f"## [{_today_date()}] {status} | {reason}",
+            f"- Affected pages: {page_links}",
+            f"- Source artifacts: {source_links}",
+            f"- Next action: {next_action}",
+        ]
+    )
+    atomic_write_text(review_path, existing.rstrip() + "\n\n" + entry + "\n")
+
+
+def _matching_chat_sources_for_fact(page: bw.Page, *, fact_key: str) -> list[tuple[str, dict[str, object]]]:
+    matches: list[tuple[str, dict[str, object]]] = []
+    for source_path, source in page.sources.items():
+        if source.source_kind != "chat":
+            continue
+        try:
+            artifact_frontmatter, _ = parse_raw_note(_resolve_repo_relative_path(source_path))
+        except Exception:
+            continue
+        if artifact_frontmatter.get("fact_key") != fact_key:
+            continue
+        matches.append((source_path, artifact_frontmatter))
+    return matches
 
 
 def validate_adoptable_raw(path: Path, capture_id: str) -> None:
@@ -735,6 +904,10 @@ def validate_ingest_inputs(items: list[ExportItem | dict[str, object]]) -> list[
             raise ValueError(
                 f"raw note frontmatter capture_id mismatch for capture_id {normalized['capture_id']}: {normalized['raw_path']}"
             )
+        if frontmatter.get("source_kind") != "capture":
+            raise ValueError(f"raw note missing capture source_kind for capture_id {normalized['capture_id']}: {normalized['raw_path']}")
+        if frontmatter.get("source_id") != stable_source_id("capture", normalized["capture_id"]):
+            raise ValueError(f"raw note source_id mismatch for capture_id {normalized['capture_id']}: {normalized['raw_path']}")
         validated.append(normalized)
     return validated
 
@@ -758,13 +931,28 @@ def _rewrite_raw_integrated_at(path: Path, integrated_at: str) -> None:
     frontmatter["integrated_at"] = integrated_at
     atomic_write_text(
         path,
-        render_note(frontmatter, body, key_order=["capture_id", "title", "created_at", "source_file", "integrated_at"]),
+        render_note(
+            frontmatter,
+            body,
+            key_order=[
+                "capture_id",
+                "source_kind",
+                "source_id",
+                "title",
+                "created_at",
+                "external_url",
+                "source_file",
+                "integrated_at",
+            ],
+        ),
     )
 
 
 def _derive_path_topics(path: Path) -> list[str]:
-    if RAW_ROOT in path.parents:
-        relative_parts = path.relative_to(RAW_ROOT).parts[:-1]
+    path_abs = Path(os.path.abspath(path))
+    raw_root_abs = Path(os.path.abspath(RAW_ROOT))
+    if Path(os.path.commonpath([raw_root_abs, path_abs])) == raw_root_abs:
+        relative_parts = Path(os.path.relpath(path_abs, raw_root_abs)).parts[:-1]
     else:
         relative_parts = path.parts[:-1]
     topics: list[str] = []
@@ -801,8 +989,10 @@ def _build_default_page_assignments(title: str, body: str, raw_abspath: Path) ->
     return assignments
 
 
-def _default_source_record(title: str, body: str, raw_path: Path) -> bw.SourceRecord:
-    url = bw.extract_first_url(body)
+def _source_record_from_artifact(frontmatter: dict[str, object], title: str, body: str, source_path: Path) -> bw.SourceRecord:
+    url = frontmatter.get("external_url")
+    if not isinstance(url, str) or not url:
+        url = bw.extract_first_url(body)
     fetched_summary = None
     source_status = "local_only"
     if url:
@@ -814,11 +1004,19 @@ def _default_source_record(title: str, body: str, raw_path: Path) -> bw.SourceRe
             source_status = fetch_result.status
     return bw.prepare_source_record(
         source_label=title,
-        source_path="../" + raw_path.relative_to(ROOT).as_posix(),
+        source_path="../" + normalize_repo_path(source_path),
         source_status=source_status,
         raw_content=body,
         fetched_summary=fetched_summary,
         detected_url=url,
+        source_kind=str(frontmatter.get("source_kind", "capture")),
+        source_id=str(frontmatter["source_id"]) if frontmatter.get("source_id") is not None else None,
+        created_at=str(frontmatter["created_at"]) if frontmatter.get("created_at") is not None else None,
+        title=str(frontmatter.get("title", title)),
+        external_url=url,
+        provenance_pointer=(
+            str(frontmatter["provenance_pointer"]) if frontmatter.get("provenance_pointer") is not None else None
+        ),
     )
 
 
@@ -836,6 +1034,86 @@ def _parse_source_line(line: str, retained_evidence: str) -> bw.SourceRecord | N
 
 def _parse_connection_slugs(connection_lines: list[str]) -> list[str]:
     return bw.extract_connection_slugs(connection_lines)
+
+
+def _read_wiki_page(slug: str, *, original_title: str, seed_kind: str) -> bw.Page:
+    page_path = WIKI_ROOT / f"{slug}.md"
+    if page_path.exists():
+        return bw.parsed_page_to_page(bw.parse_page_file(page_path))
+    return bw.Page(
+        slug=slug,
+        title=bw.page_title(slug),
+        page_type=bw.classify_page(slug, original_title, seed_kind),
+        summary_hint=original_title,
+    )
+
+
+def _validate_router_decision(decision: RouterDecision) -> RouterDecision:
+    allowed_actions = {"ignore", "light_update", "heavy_update", "queue_review"}
+    allowed_risk = {"low", "medium", "high"}
+    allowed_confidence = {"low", "medium", "high"}
+    if decision.action not in allowed_actions:
+        raise ValueError(f"invalid router action: {decision.action}")
+    if decision.contradiction_risk not in allowed_risk:
+        raise ValueError(f"invalid contradiction risk: {decision.contradiction_risk}")
+    if decision.confidence not in allowed_confidence:
+        raise ValueError(f"invalid router confidence: {decision.confidence}")
+    if not decision.reason.strip():
+        raise ValueError("router reason must be non-empty")
+    if any(not slug.strip() for slug in decision.target_pages):
+        raise ValueError("router target pages must be non-empty")
+    return decision
+
+
+def _route_source_update(
+    *,
+    title: str,
+    body: str,
+    page_assignments: list[tuple[str, str]],
+) -> RouterDecision:
+    target_pages = [slug for slug, _seed_kind in page_assignments]
+    candidate_new_pages: list[str] = []
+    reorganization_risk = False
+    existing_atomic_targets = 0
+    for slug, seed_kind in page_assignments:
+        page = _read_wiki_page(slug, original_title=title, seed_kind=seed_kind)
+        if (WIKI_ROOT / f"{slug}.md").exists():
+            if bw.page_shape(page) == bw.PAGE_SHAPE_TOPIC:
+                reorganization_risk = True
+            else:
+                existing_atomic_targets += 1
+        else:
+            candidate_new_pages.append(slug)
+    new_page_signal = bool(candidate_new_pages)
+    contradiction_risk = "low"
+    if len(target_pages) == 1 and existing_atomic_targets == 1 and not new_page_signal and not reorganization_risk:
+        action = "light_update"
+        confidence = "high"
+        reason = "Single existing atomic page can absorb a bounded update."
+    elif not body.strip() and bw.slugify(title) in {"", "untitled", "new-note"}:
+        action = "ignore"
+        confidence = "medium"
+        reason = "Source has no durable title or body signal after normalization."
+    elif reorganization_risk or len(target_pages) > 2 or new_page_signal:
+        action = "heavy_update"
+        confidence = "medium"
+        reason = "Source impacts new pages or pages that may need structural reorganization."
+    else:
+        action = "light_update"
+        confidence = "medium"
+        reason = "Source touches a small known page set and can be merged deterministically."
+    return _validate_router_decision(
+        RouterDecision(
+            action=action,
+            target_pages=target_pages,
+            new_page_signal=new_page_signal,
+            candidate_new_pages=candidate_new_pages,
+            contradiction_risk=contradiction_risk,
+            reorganization_risk=reorganization_risk,
+            confidence=confidence,
+            reason=reason,
+        )
+    )
 
 
 def _build_bootstrap_page_for_touch(
@@ -933,45 +1211,218 @@ def _count_page_sources(page_path: Path) -> int:
 
 
 def _rewrite_index(changed_pages: list[tuple[str, str]]) -> None:
-    _ = changed_pages
     index_path = WIKI_ROOT / "index.md"
     page_types = bw.load_existing_page_types(index_path)
     pages: dict[str, bw.Page] = {}
     for page_path in sorted(WIKI_ROOT.glob("*.md")):
-        if page_path.stem in {"index", "log"}:
+        if page_path.stem in {"index", "log", "review", Path(bw.CATALOG_PATH).stem}:
             continue
         parsed = bw.parse_page_file(page_path, page_type=page_types.get(page_path.stem))
         pages[page_path.stem] = bw.parsed_page_to_page(parsed)
-    atomic_write_text(index_path, bw.render_index(pages))
+    counts = bw.inbound_link_counts(pages)
+    grouped: dict[str, list[bw.Page]] = {section: [] for section in bw.INDEX_SECTION_ORDER}
+    forced_slugs = {slug for slug, _page_type in changed_pages}
+    for page in pages.values():
+        if page.slug in forced_slugs or bw.page_shape(page) == bw.PAGE_SHAPE_TOPIC or counts.get(page.slug, 0) >= bw.HIGH_SIGNAL_INBOUND_THRESHOLD:
+            grouped.setdefault(page.page_type, []).append(page)
+
+    lines = [
+        "# Wiki Index",
+        "",
+        f"_Last updated: {_today_date()} — {len(pages)} pages_",
+        "_Navigation only: topic pages plus high-signal atomic pages. Use [[catalog]] for exhaustive lookup._",
+        "",
+    ]
+    for section in bw.INDEX_SECTION_ORDER:
+        lines.append(f"## {section}")
+        section_pages = sorted(grouped.get(section, []), key=lambda page: page.title.lower())
+        if not section_pages:
+            lines.append("- None yet.")
+            lines.append("")
+            continue
+        for page in section_pages:
+            lines.append(f"- [[{page.slug}]] — {bw.page_index_summary(page)}")
+        lines.append("")
+    atomic_write_text(index_path, "\n".join(lines))
 
 
-def _append_wiki_ingest_log(title: str) -> None:
+def _append_wiki_ingest_log(title: str, *, router_decision: RouterDecision | None = None) -> None:
     log_path = WIKI_ROOT / "log.md"
     existing = log_path.read_text(encoding="utf-8") if log_path.exists() else "# Wiki Log\n"
     entry = f'## [{_today_date()}] ingest | Capture: "{title}"'
+    if router_decision is not None:
+        entry += f" | Router: {router_decision.action}"
     atomic_write_text(log_path, existing.rstrip() + "\n\n" + entry + "\n")
 
 
-def _upsert_wiki_pages_for_note(*, title: str, body: str, raw_path: Path, page_resynthesis_on_touch: bool = False) -> None:
-    _ = page_resynthesis_on_touch
-    source_record = _default_source_record(title, body, raw_path)
-    page_assignments = _build_default_page_assignments(title, body, raw_path)
-    changed_pages: list[tuple[str, str]] = []
+def query_writeback_chat_fact(
+    *,
+    page_title: str,
+    note: str,
+    related_pages: list[str],
+    created_at: str,
+    conversation_ref: str,
+    fact_key: str,
+    replacement_intent: bool = False,
+    external_url: str | None = None,
+) -> QueryWritebackResult:
+    target_slug = bw.slugify(page_title)
+    if not target_slug:
+        raise ValueError("page_title must produce a valid slug")
+    normalized_note = note.strip()
+    if not normalized_note:
+        raise ValueError("note must be non-empty")
+    normalized_related_pages = bw.ordered_unique([bw.slugify(value) for value in related_pages if bw.slugify(value)])
+    source_path = persist_chat_source_artifact(
+        title=page_title,
+        body=normalized_note,
+        created_at=created_at,
+        conversation_ref=conversation_ref,
+        external_url=external_url,
+        extra_frontmatter={
+            "target_page": target_slug,
+            "target_note": normalized_note,
+            "fact_key": fact_key,
+            "replacement_intent": replacement_intent,
+        },
+    )
+    frontmatter, body = parse_raw_note(source_path)
+    source_record = _source_record_from_artifact(frontmatter, page_title, body, source_path)
+    router_decision = _route_source_update(
+        title=page_title,
+        body=normalized_note,
+        page_assignments=[(target_slug, "title"), *[(slug, "query") for slug in normalized_related_pages]],
+    )
+
     loaded_pages: dict[str, bw.Page] = {}
 
     def load_page(slug: str, seed_kind: str) -> bw.Page:
         if slug in loaded_pages:
             return loaded_pages[slug]
-        page_path = WIKI_ROOT / f"{slug}.md"
-        if page_path.exists():
-            page = bw.parsed_page_to_page(bw.parse_page_file(page_path))
+        page = _read_wiki_page(slug, original_title=page_title, seed_kind=seed_kind)
+        loaded_pages[slug] = page
+        return page
+
+    target_page = load_page(target_slug, "title")
+    target_page.shape = bw.PAGE_SHAPE_ATOMIC
+    target_page.page_type = bw.classify_page(target_slug, page_title, "title")
+
+    for related_slug in normalized_related_pages:
+        related_page = load_page(related_slug, "query")
+        if bw.page_shape(related_page) != bw.PAGE_SHAPE_TOPIC:
+            related_page.shape = bw.PAGE_SHAPE_ATOMIC
+        bw.connect_pages(loaded_pages, target_slug, related_slug)
+
+    duplicate_of_source_path: str | None = None
+    superseded_source_paths: list[str] = []
+    review_queued = False
+    matching_sources = _matching_chat_sources_for_fact(target_page, fact_key=fact_key)
+    for existing_source_path, artifact_frontmatter in matching_sources:
+        existing_note = str(artifact_frontmatter.get("target_note", "")).strip()
+        if existing_note == normalized_note:
+            duplicate_of_source_path = existing_source_path
+            break
+
+    if duplicate_of_source_path is None:
+        if replacement_intent:
+            for existing_source_path, artifact_frontmatter in matching_sources:
+                existing_note = str(artifact_frontmatter.get("target_note", "")).strip()
+                if existing_note == normalized_note:
+                    continue
+                _remove_source_from_page(target_page, existing_source_path)
+                superseded_source_paths.append(existing_source_path)
         else:
-            page = bw.Page(
-                slug=slug,
-                title=bw.page_title(slug),
-                page_type=bw.classify_page(slug, title, seed_kind),
-                summary_hint=title,
+            conflicting_notes = sorted(
+                {
+                    str(artifact_frontmatter.get("target_note", "")).strip()
+                    for _existing_source_path, artifact_frontmatter in matching_sources
+                    if str(artifact_frontmatter.get("target_note", "")).strip()
+                    and str(artifact_frontmatter.get("target_note", "")).strip() != normalized_note
+                }
             )
+            if conflicting_notes:
+                question = (
+                    f"Conflicting chat-derived fact for {fact_key}: current notes include "
+                    + "; ".join(f'"{value}"' for value in conflicting_notes + [normalized_note])
+                    + "."
+                )
+                if question not in target_page.open_questions:
+                    target_page.open_questions.append(question)
+                _append_review_backlog_item(
+                    reason=f"contradiction | {fact_key}",
+                    affected_pages=[target_slug],
+                    source_paths=[*superseded_source_paths, *[path for path, _ in matching_sources], "../" + normalize_repo_path(source_path)],
+                    next_action="Confirm which chat-derived fact should remain current on the page.",
+                )
+                review_queued = True
+
+        bw.add_source_to_page(target_page, source_record, seed_kind="query")
+
+    changed_slugs: list[str] = []
+    allow_missing_outbound = bool(normalized_related_pages) or bool(target_page.connections)
+    issues = bw.validate_page(target_page, allow_missing_outbound=allow_missing_outbound)
+    if issues:
+        _append_review_backlog_item(
+            reason="invalid query writeback",
+            affected_pages=[target_slug],
+            source_paths=["../" + normalize_repo_path(source_path)],
+            next_action=f"Repair page shape before applying query writeback: {', '.join(issues)}",
+        )
+        raise ValueError(f"invalid page '{target_slug}': {', '.join(issues)}")
+
+    pages_to_write = {target_slug: target_page}
+    for related_slug in normalized_related_pages:
+        pages_to_write[related_slug] = loaded_pages[related_slug]
+
+    for slug, page in pages_to_write.items():
+        page_issues = bw.validate_page(
+            page,
+            allow_missing_outbound=slug != target_slug or bool(page.connections),
+        )
+        if page_issues:
+            raise ValueError(f"invalid page '{slug}': {', '.join(page_issues)}")
+        atomic_write_text(WIKI_ROOT / f"{slug}.md", bw.render_page(page))
+        changed_slugs.append(slug)
+
+    if duplicate_of_source_path is None:
+        _rewrite_index([(slug, pages_to_write[slug].page_type) for slug in changed_slugs])
+        summary = f'writeback | "{page_title}" | Router: {router_decision.action}'
+        if superseded_source_paths:
+            summary += " | superseded prior chat fact"
+        if review_queued:
+            summary += " | review queued"
+        bw.append_wiki_query_log(summary)
+
+    return QueryWritebackResult(
+        changed_slugs=changed_slugs,
+        source_path=source_path,
+        router_decision=router_decision,
+        review_queued=review_queued,
+        superseded_source_paths=superseded_source_paths,
+        duplicate_of_source_path=duplicate_of_source_path,
+    )
+
+
+def _upsert_wiki_pages_for_note(
+    *,
+    frontmatter: dict[str, object],
+    title: str,
+    body: str,
+    raw_path: Path,
+    page_resynthesis_on_touch: bool = False,
+) -> MaintenanceOutcome:
+    _ = page_resynthesis_on_touch
+    source_record = _source_record_from_artifact(frontmatter, title, body, raw_path)
+    page_assignments = _build_default_page_assignments(title, body, raw_path)
+    router_decision = _route_source_update(title=title, body=body, page_assignments=page_assignments)
+    if router_decision.action == "ignore":
+        return MaintenanceOutcome(router_decision=router_decision)
+    loaded_pages: dict[str, bw.Page] = {}
+
+    def load_page(slug: str, seed_kind: str) -> bw.Page:
+        if slug in loaded_pages:
+            return loaded_pages[slug]
+        page = _read_wiki_page(slug, original_title=title, seed_kind=seed_kind)
         loaded_pages[slug] = page
         return page
 
@@ -1003,8 +1454,6 @@ def _upsert_wiki_pages_for_note(*, title: str, body: str, raw_path: Path, page_r
             parent_page = load_page(parent_slug, seed_kind)
             parent_page.shape = bw.PAGE_SHAPE_TOPIC
             bw.connect_pages(loaded_pages, parent_slug, slug)
-            changed_pages.append((parent_slug, parent_page.page_type))
-        changed_pages.append((slug, page.page_type))
 
     for slug in resolved_slugs:
         for other_slug in resolved_slugs:
@@ -1033,11 +1482,18 @@ def _upsert_wiki_pages_for_note(*, title: str, body: str, raw_path: Path, page_r
     bw.prune_generic_media_links(loaded_pages)
     bw.ensure_meaningful_connections(loaded_pages)
     bw.finalize_page_shapes(loaded_pages)
+    changed_slugs: list[str] = []
     for slug, page in loaded_pages.items():
+        allow_missing_outbound = bool(page.topic_parent) or len(loaded_pages) == 1
+        issues = bw.validate_page(page, allow_missing_outbound=allow_missing_outbound)
+        if issues:
+            raise ValueError(f"invalid page '{slug}': {', '.join(issues)}")
         atomic_write_text(WIKI_ROOT / f"{slug}.md", bw.render_page(page))
+        changed_slugs.append(slug)
 
-    _rewrite_index(changed_pages)
-    _append_wiki_ingest_log(title)
+    _rewrite_index([(slug, loaded_pages[slug].page_type) for slug in changed_slugs])
+    _append_wiki_ingest_log(title, router_decision=router_decision)
+    return MaintenanceOutcome(changed_slugs=changed_slugs, router_decision=router_decision)
 
 
 def _default_integration_handler(
@@ -1047,8 +1503,9 @@ def _default_integration_handler(
     page_resynthesis_on_touch: bool = False,
 ) -> None:
     _ = capture_id
-    _, title, body = _read_raw_note(raw_path)
+    frontmatter, title, body = _read_raw_note(raw_path)
     _upsert_wiki_pages_for_note(
+        frontmatter=frontmatter,
         title=title,
         body=body,
         raw_path=raw_path,

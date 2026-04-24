@@ -28,6 +28,152 @@ def load_source(name: str) -> bw.SourceRecord:
 
 
 class BootstrapWikiTests(unittest.TestCase):
+    def test_validate_page_rejects_topic_with_atomic_sections(self) -> None:
+        page = bw.Page(
+            slug="desserts",
+            title="Desserts",
+            page_type="Concepts",
+            summary_hint="Desserts",
+            shape=bw.PAGE_SHAPE_TOPIC,
+        )
+        page.notes = ["Should not be here."]
+        page.sources["../raw/desserts.md"] = bw.SourceRecord(
+            label="Desserts",
+            path="../raw/desserts.md",
+            status="local_only",
+            raw_content="",
+            cleaned_text="",
+            fetched_summary=None,
+            detected_url=None,
+        )
+
+        issues = bw.validate_page(page)
+
+        self.assertEqual(issues, ["topic-pages-cannot-have-notes", "topic-pages-cannot-have-sources"])
+
+    def test_render_page_includes_open_questions_for_atomic_pages(self) -> None:
+        page = bw.Page(
+            slug="coffee",
+            title="Coffee",
+            page_type="Concepts",
+            summary_hint="Coffee",
+        )
+        page.notes = ["Marcus prefers pourover."]
+        page.open_questions = ["Is this still true when traveling?"]
+        page.connections["pourover"] += 1
+
+        rendered = bw.render_page(page)
+
+        self.assertIn("## Open Questions", rendered)
+        self.assertIn("- Is this still true when traveling?", rendered)
+
+    def test_render_index_stays_compact_and_catalog_remains_exhaustive(self) -> None:
+        topic = bw.Page(
+            slug="coffee",
+            title="Coffee",
+            page_type="Concepts",
+            summary_hint="Coffee",
+            shape=bw.PAGE_SHAPE_TOPIC,
+        )
+        topic.connections["espresso"] += 1
+        topic.connections["pourover"] += 1
+
+        espresso = bw.Page(
+            slug="espresso",
+            title="Espresso",
+            page_type="Concepts",
+            summary_hint="Espresso",
+        )
+        espresso.notes = ["Concentrated coffee shot."]
+        espresso.connections["coffee"] += 1
+
+        obscure = bw.Page(
+            slug="obscure-brewing-note",
+            title="Obscure Brewing Note",
+            page_type="Concepts",
+            summary_hint="Obscure Brewing Note",
+        )
+        obscure.notes = ["Brew ratio note worth keeping."]
+        obscure.connections["coffee"] += 1
+
+        aeropress = bw.Page(
+            slug="aeropress",
+            title="Aeropress",
+            page_type="Concepts",
+            summary_hint="Aeropress",
+        )
+        aeropress.notes = ["Portable brew method."]
+        aeropress.connections["espresso"] += 1
+        grinder = bw.Page(
+            slug="grinder",
+            title="Grinder",
+            page_type="Concepts",
+            summary_hint="Grinder",
+        )
+        grinder.notes = ["Grind consistency matters."]
+        grinder.connections["espresso"] += 1
+        beans = bw.Page(
+            slug="beans",
+            title="Beans",
+            page_type="Concepts",
+            summary_hint="Beans",
+        )
+        beans.notes = ["Origin affects flavor."]
+        beans.connections["espresso"] += 1
+
+        pages = {
+            "coffee": topic,
+            "espresso": espresso,
+            "obscure-brewing-note": obscure,
+            "aeropress": aeropress,
+            "grinder": grinder,
+            "beans": beans,
+        }
+
+        index_text = bw.render_index(pages)
+        catalog_text = bw.render_catalog(pages)
+
+        self.assertIn("[[coffee]]", index_text)
+        self.assertIn("[[espresso]]", index_text)
+        self.assertNotIn("[[obscure-brewing-note]]", index_text)
+        self.assertIn("[[obscure-brewing-note]]", catalog_text)
+        self.assertIn("[[catalog]]", index_text)
+
+    def test_load_existing_wiki_pages_uses_catalog_for_page_types(self) -> None:
+        page = bw.Page(
+            slug="obscure-brewing-note",
+            title="Obscure Brewing Note",
+            page_type="Experiences",
+            summary_hint="Obscure Brewing Note",
+        )
+        page.notes = ["One-off cafe observation."]
+        page.connections["coffee"] += 1
+
+        coffee = bw.Page(
+            slug="coffee",
+            title="Coffee",
+            page_type="Concepts",
+            summary_hint="Coffee",
+            shape=bw.PAGE_SHAPE_TOPIC,
+        )
+        coffee.connections["obscure-brewing-note"] += 1
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            wiki_root = root / "wiki"
+            wiki_root.mkdir()
+
+            with bw.temporary_workspace(root):
+                bw.atomic_write_text(wiki_root / "obscure-brewing-note.md", bw.render_page(page))
+                bw.atomic_write_text(wiki_root / "coffee.md", bw.render_page(coffee))
+                bw.atomic_write_text(wiki_root / "index.md", bw.render_index({"obscure-brewing-note": page, "coffee": coffee}))
+                bw.atomic_write_text(wiki_root / bw.CATALOG_PATH, bw.render_catalog({"obscure-brewing-note": page, "coffee": coffee}))
+                bw.atomic_write_text(wiki_root / "log.md", "# Wiki Log\n")
+
+                parsed_pages = bw.load_existing_wiki_pages()
+
+        self.assertEqual(parsed_pages["obscure-brewing-note"].page_type, "Experiences")
+
     def test_bucket_scoring_recipe_like_page_crosses_threshold(self) -> None:
         sources = [
             bw.SourceRecord(
@@ -850,6 +996,7 @@ class BootstrapWikiTests(unittest.TestCase):
                 bw.atomic_write_text(wiki_root / "lazy-sequences.md", bw.render_page(pages["lazy-sequences"]))
                 bw.atomic_write_text(wiki_root / "coffee.md", bw.render_page(unrelated_page))
                 bw.atomic_write_text(wiki_root / "index.md", bw.render_index({**pages, "coffee": unrelated_page}))
+                bw.atomic_write_text(wiki_root / bw.CATALOG_PATH, bw.render_catalog({**pages, "coffee": unrelated_page}))
                 bw.atomic_write_text(wiki_root / "log.md", "# Wiki Log\n")
                 unrelated_before = (wiki_root / "coffee.md").read_text(encoding="utf-8")
 
@@ -863,15 +1010,16 @@ class BootstrapWikiTests(unittest.TestCase):
                 self.assertTrue(applied)
                 self.assertEqual(
                     {Path(call.args[0]).name for call in write_mock.call_args_list},
-                    {"lazy-sequences.md", "iterators.md", "generators.md", "index.md", "log.md"},
+                    {"lazy-sequences.md", "iterators.md", "generators.md", "index.md", "catalog.md", "log.md"},
                 )
                 self.assertEqual(unrelated_before, (wiki_root / "coffee.md").read_text(encoding="utf-8"))
                 log_text = (wiki_root / "log.md").read_text(encoding="utf-8")
                 index_text = (wiki_root / "index.md").read_text(encoding="utf-8")
+                catalog_text = (wiki_root / bw.CATALOG_PATH).read_text(encoding="utf-8")
                 self.assertIn("query | split-adjacent query writeback", log_text)
                 self.assertIn("lazy-sequences -> iterators, generators", log_text)
-                self.assertIn("[[iterators]]", index_text)
-                self.assertIn("[[generators]]", index_text)
+                self.assertIn("[[iterators]]", catalog_text)
+                self.assertIn("[[generators]]", catalog_text)
 
     def test_maybe_apply_query_time_split_fix_rejects_unstable_decisions(self) -> None:
         source = bw.SourceRecord(
@@ -921,6 +1069,7 @@ class BootstrapWikiTests(unittest.TestCase):
             with bw.temporary_workspace(root):
                 bw.atomic_write_text(wiki_root / "lazy-sequences.md", bw.render_page(page))
                 bw.atomic_write_text(wiki_root / "index.md", bw.render_index({"lazy-sequences": page}))
+                bw.atomic_write_text(wiki_root / bw.CATALOG_PATH, bw.render_catalog({"lazy-sequences": page}))
                 bw.atomic_write_text(wiki_root / "log.md", "# Wiki Log\n")
                 parent_before = (wiki_root / "lazy-sequences.md").read_text(encoding="utf-8")
                 log_before = (wiki_root / "log.md").read_text(encoding="utf-8")
@@ -983,6 +1132,7 @@ class BootstrapWikiTests(unittest.TestCase):
             with bw.temporary_workspace(root):
                 bw.atomic_write_text(wiki_root / "lazy-sequences.md", bw.render_page(page))
                 bw.atomic_write_text(wiki_root / "index.md", bw.render_index({"lazy-sequences": page}))
+                bw.atomic_write_text(wiki_root / bw.CATALOG_PATH, bw.render_catalog({"lazy-sequences": page}))
                 bw.atomic_write_text(wiki_root / "log.md", "# Wiki Log\n")
 
                 first = bw.maybe_apply_query_time_split_fix(

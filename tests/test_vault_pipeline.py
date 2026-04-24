@@ -18,6 +18,8 @@ from scripts import vault_pipeline as vp
 def isolated_env() -> tuple[Path, Path, Path, Path]:
     original_root = vp.ROOT
     original_raw_root = vp.RAW_ROOT
+    original_sources_root = vp.SOURCES_ROOT
+    original_chat_sources_root = vp.CHAT_SOURCES_ROOT
     original_wiki_root = vp.WIKI_ROOT
     original_log_path = vp.JSONL_LOG_PATH
     original_capture_root = vp.DEFAULT_CAPTURE_ROOT
@@ -25,25 +27,33 @@ def isolated_env() -> tuple[Path, Path, Path, Path]:
     with tempfile.TemporaryDirectory() as tmp_dir:
         root = Path(tmp_dir)
         raw_root = root / "raw"
+        sources_root = root / "sources"
         wiki_root = root / "wiki"
         capture_root = root / "capture"
         raw_root.mkdir()
+        sources_root.mkdir()
         wiki_root.mkdir()
         capture_root.mkdir()
 
         vp.ROOT = root
         vp.RAW_ROOT = raw_root
+        vp.SOURCES_ROOT = sources_root
+        vp.CHAT_SOURCES_ROOT = sources_root / "chat"
         vp.WIKI_ROOT = wiki_root
         vp.JSONL_LOG_PATH = root / "log.jsonl"
         vp.DEFAULT_CAPTURE_ROOT = capture_root
+        vp.bw.configure_workspace(root)
         try:
             yield root, raw_root, wiki_root, capture_root
         finally:
             vp.ROOT = original_root
             vp.RAW_ROOT = original_raw_root
+            vp.SOURCES_ROOT = original_sources_root
+            vp.CHAT_SOURCES_ROOT = original_chat_sources_root
             vp.WIKI_ROOT = original_wiki_root
             vp.JSONL_LOG_PATH = original_log_path
             vp.DEFAULT_CAPTURE_ROOT = original_capture_root
+            vp.bw.configure_workspace(original_root)
 
 
 def write_note(path: Path, body: str, frontmatter: dict[str, object] | None = None) -> None:
@@ -68,8 +78,159 @@ class VaultPipelineTests(unittest.TestCase):
             body="Line 1\n\n# Existing heading",
         )
         self.assertIn("capture_id: '123'", rendered)
+        self.assertIn("source_kind: 'capture'", rendered)
+        self.assertIn("source_id: 'capture:123'", rendered)
         self.assertIn("source_file: 'My note.md'", rendered)
         self.assertIn("# My note\n\nLine 1", rendered)
+
+    def test_persist_chat_source_artifact_uses_chat_root_and_metadata(self) -> None:
+        with isolated_env() as (root, _, _, _):
+            created_at = "2026-04-23T10:00:00Z"
+            path = vp.persist_chat_source_artifact(
+                title="Favorite Coffee",
+                body="Marcus prefers pourover over espresso at home.",
+                created_at=created_at,
+                conversation_ref="chat:2026-04-23T10:00:00Z",
+            )
+
+            self.assertTrue(path.is_file())
+            self.assertTrue(path.is_relative_to(root / "sources" / "chat"))
+            frontmatter, body = vp.parse_raw_note(path)
+            self.assertEqual(frontmatter["source_kind"], "chat")
+            self.assertTrue(str(frontmatter["source_id"]).startswith("chat:"))
+            self.assertEqual(frontmatter["created_at"], created_at)
+            self.assertEqual(frontmatter["provenance_pointer"], "chat:2026-04-23T10:00:00Z")
+            self.assertIn("# Favorite Coffee", body)
+
+    def test_router_marks_single_existing_atomic_page_as_light_update(self) -> None:
+        with isolated_env() as (_, _, wiki_root, _):
+            (wiki_root / "topic-a.md").write_text(
+                "\n".join(
+                    [
+                        "# Topic A",
+                        "",
+                        "## Notes",
+                        "",
+                        "- Existing note.",
+                        "",
+                        "## Connections",
+                        "",
+                        "- [[existing-link]]",
+                        "",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            decision = vp._route_source_update(
+                title="Topic A",
+                body="Fresh bounded update.",
+                page_assignments=[("topic-a", "title")],
+            )
+
+            self.assertEqual(decision.action, "light_update")
+            self.assertEqual(decision.target_pages, ["topic-a"])
+            self.assertFalse(decision.new_page_signal)
+
+    def test_router_marks_new_page_as_heavy_update(self) -> None:
+        with isolated_env():
+            decision = vp._route_source_update(
+                title="Brand New Topic",
+                body="New source for a new page.",
+                page_assignments=[("brand-new-topic", "title")],
+            )
+
+            self.assertEqual(decision.action, "heavy_update")
+            self.assertEqual(decision.candidate_new_pages, ["brand-new-topic"])
+
+    def test_query_writeback_chat_fact_persists_artifact_updates_page_and_logs_query(self) -> None:
+        with isolated_env() as (root, _, wiki_root, _):
+            result = vp.query_writeback_chat_fact(
+                page_title="Coffee Preferences",
+                note="Marcus prefers pourover over espresso at home.",
+                related_pages=["coffee"],
+                created_at="2026-04-23T10:00:00Z",
+                conversation_ref="chat:2026-04-23T10:00:00Z",
+                fact_key="home-brew-method",
+            )
+
+            self.assertEqual(sorted(result.changed_slugs), ["coffee", "coffee-preferences"])
+            self.assertIsNotNone(result.source_path)
+            assert result.source_path is not None
+            self.assertTrue(result.source_path.is_relative_to(root / "sources" / "chat"))
+
+            target_page = (wiki_root / "coffee-preferences.md").read_text(encoding="utf-8")
+            self.assertIn("Marcus prefers pourover over espresso at home.", target_page)
+            self.assertIn("- [[coffee]]", target_page)
+            self.assertIn("../sources/chat/", target_page)
+
+            query_log = (wiki_root / "log.md").read_text(encoding="utf-8")
+            self.assertIn('query | writeback | "Coffee Preferences" | Router: heavy_update', query_log)
+
+            index_text = (wiki_root / "index.md").read_text(encoding="utf-8")
+            self.assertNotIn("[[review]]", index_text)
+
+    def test_query_writeback_chat_fact_supersedes_prior_chat_fact_without_open_question(self) -> None:
+        with isolated_env() as (_, _, wiki_root, _):
+            first = vp.query_writeback_chat_fact(
+                page_title="Coffee Preferences",
+                note="Marcus prefers pourover over espresso at home.",
+                related_pages=["coffee"],
+                created_at="2026-04-23T10:00:00Z",
+                conversation_ref="chat:2026-04-23T10:00:00Z",
+                fact_key="home-brew-method",
+            )
+            second = vp.query_writeback_chat_fact(
+                page_title="Coffee Preferences",
+                note="Marcus now prefers espresso over pourover at home.",
+                related_pages=["coffee"],
+                created_at="2026-04-23T11:00:00Z",
+                conversation_ref="chat:2026-04-23T11:00:00Z",
+                fact_key="home-brew-method",
+                replacement_intent=True,
+            )
+
+            self.assertIsNotNone(first.source_path)
+            self.assertIsNotNone(second.source_path)
+            page_text = (wiki_root / "coffee-preferences.md").read_text(encoding="utf-8")
+            self.assertIn("Marcus now prefers espresso over pourover at home.", page_text)
+            self.assertNotIn("Marcus prefers pourover over espresso at home.", page_text)
+            self.assertNotIn("## Open Questions", page_text)
+            self.assertEqual(len(list((vp.CHAT_SOURCES_ROOT).glob("*.md"))), 2)
+            self.assertTrue(second.superseded_source_paths)
+            review_path = wiki_root / "review.md"
+            self.assertFalse(review_path.exists())
+
+    def test_query_writeback_chat_fact_queues_review_for_conflicting_fact(self) -> None:
+        with isolated_env() as (_, _, wiki_root, _):
+            vp.query_writeback_chat_fact(
+                page_title="Coffee Preferences",
+                note="Marcus prefers pourover over espresso at home.",
+                related_pages=["coffee"],
+                created_at="2026-04-23T10:00:00Z",
+                conversation_ref="chat:2026-04-23T10:00:00Z",
+                fact_key="home-brew-method",
+            )
+            result = vp.query_writeback_chat_fact(
+                page_title="Coffee Preferences",
+                note="Marcus prefers espresso over pourover at home.",
+                related_pages=["coffee"],
+                created_at="2026-04-23T11:00:00Z",
+                conversation_ref="chat:2026-04-23T11:00:00Z",
+                fact_key="home-brew-method",
+            )
+
+            self.assertTrue(result.review_queued)
+            page_text = (wiki_root / "coffee-preferences.md").read_text(encoding="utf-8")
+            self.assertIn("## Open Questions", page_text)
+            self.assertIn("Conflicting chat-derived fact for home-brew-method", page_text)
+            self.assertIn("Marcus prefers pourover over espresso at home.", page_text)
+            self.assertIn("Marcus prefers espresso over pourover at home.", page_text)
+
+            review_text = (wiki_root / "review.md").read_text(encoding="utf-8")
+            self.assertIn("contradiction | home-brew-method", review_text)
+            self.assertIn("[../sources/chat/", review_text)
 
     def test_capture_ingest_injects_exports_and_marks_processed(self) -> None:
         with isolated_env() as (_, raw_root, _, capture_root):
