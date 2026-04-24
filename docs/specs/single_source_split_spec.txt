@@ -1,24 +1,138 @@
 Single-Source Split Spec
 ========================
 
+Summary
+-------
+The wiki must support splitting one raw source note into multiple atomic wiki pages when that source contains multiple independently reusable ideas.
+
+This is not a special-case lecture feature. It is a general wiki rule:
+
+- splitting is based on atomicity of ideas, not number of source notes
+- one raw source may support multiple wiki pages
+- topic pages may exist with 2 strong children when the parent label is a clean, non-generic compression
+
 Problem
 -------
-The current wiki split pipeline only supports splitting a page when that page is backed by multiple source notes. This prevents one long lecture note from being turned into multiple atomic wiki notes, even when the source clearly contains several distinct reusable ideas.
+The current split pipeline is effectively constrained by source-count assumptions. In practice, this blocks an important class of wiki maintenance: a single long note that clearly contains several atomic ideas cannot be turned into several atomic wiki notes unless multiple source files already exist.
 
-Requirement
------------
-The wiki system should support splitting a single source note into multiple atomic wiki notes when the note contains multiple separable concepts. Lecture notes are an important example, but this should apply more generally to any single note that naturally contains several atomic ideas.
+That produces the wrong behavior for many real notes:
+
+- a lecture note that meaningfully covers multiple standalone ideas
+- a long capture that discusses several entities or concepts
+- a source that should contribute durable evidence to several different atomic pages
 
 Big Idea
 --------
-Splitting should not be limited to whole-source assignment. The system needs a way to recognize multiple atomic notes inside one source note and allow those ideas to become separate wiki pages.
+The unit of synthesis is the reusable idea, not the source file.
 
-Why It Matters
+If one raw note contains several ideas that should stand as separate wiki pages, the system should split that note into multiple atomic pages even when there is only one source file. The same source may then appear in the `## Sources` section of multiple child pages.
+
+Decision Rules
 --------------
-- One lecture note often covers several concepts that should be independently searchable and linkable.
-- Keeping an entire lecture as one note reduces the value of the wiki graph.
-- The current multi-source-only split rule blocks a meaningful class of atomic-note creation.
 
-Non-Goal For This Spec
-----------------------
-This spec does not define the exact implementation, data model, prompting strategy, or rendering behavior. It only records the product requirement that single-source splitting must be possible.
+What qualifies for splitting:
+
+- Split when the source contains multiple independently reusable ideas that should be separately searchable, linkable, and maintainable.
+- Do not require multiple source files.
+- Do not require explicit section headings.
+- Do not require each child page to map to one isolated source subsection.
+
+What does not qualify for splitting:
+
+- Do not split just because a note has several subtopics inside one still-coherent atomic note.
+- Do not split into generic buckets, storage labels, or source-shaped wrappers.
+- Do not create pages that are not grounded in the source.
+
+Examples:
+
+- Split: one note about fast-food history that contains durable material on McDonald's history and Burger King history
+- Split: one note that substantively covers both iterators and generators as separate reusable concepts
+- Do not split: one note whose subpoints are all still part of one atomic note about a single concept
+
+Lecture Notes
+-------------
+Lecture notes are not special-cased.
+
+- Apply the same atomicity rule to lecture notes and non-lecture notes.
+- A lecture note may remain atomic if it is still one coherent reusable note.
+- A lecture note may split if it clearly contains multiple independently reusable ideas.
+
+The source being a lecture is not, by itself, a reason to preserve or force a split.
+
+Source Reuse And Provenance
+---------------------------
+One raw source may support multiple atomic pages.
+
+- After a split, the same raw note may be listed in the `## Sources` section of multiple child pages.
+- Each child page should list the source directly when that source grounds the child page.
+- Do not force one source to have exactly one owning wiki page.
+- Do not hide provenance only on the parent topic page.
+
+Child Page Content
+------------------
+Child pages may contain grounded synthesis.
+
+- A child page does not need to be a direct passage extract.
+- The system may write compact synthesized notes for each child page as long as the content is grounded in the shared raw source.
+- Synthesis should remain faithful to the source and should not invent unsupported claims.
+
+Parent And Topic Behavior
+-------------------------
+When a split produces multiple atomic children, the original umbrella page should become a topic page when the parent label is still a clean compression of the children.
+
+Topic-page rule:
+
+- Topic pages may exist with 2 or more strong child pages.
+- The parent label must be specific, clean, and non-generic.
+- Do not create or preserve topic pages with generic labels such as `notes`, `misc`, `week-3`, `lecture-5`, or similar source-shaped buckets.
+
+Implication:
+
+- The general wiki rule is no longer "topic pages require at least 3 children."
+- The general rule becomes "topic pages require at least 2 strong children plus a clean compression label."
+
+Query-Time Behavior
+-------------------
+Queries may produce durable wiki updates, but only narrowly.
+
+- A query may trigger a split or related structural fix when there is a clear structural deficiency in the existing wiki and the change is strongly grounded in existing sources.
+- Query-time writes should be narrow and auditable, not broad opportunistic maintenance.
+- Query-time writes must not modify `raw/`.
+- Query-time writes should remain logged as `query` entries with a short mutation note.
+
+This keeps the wiki compounding through use without turning query execution into unrestricted background maintenance.
+
+Ingest And Maintenance Behavior
+-------------------------------
+Single-source splitting should be available wherever the wiki is actively maintained.
+
+- It should be available during ingest of new notes.
+- It should also be available in maintenance paths that revisit existing wiki pages.
+- It should not be treated as bootstrap-only behavior.
+
+Rollout
+-------
+The intended steady-state behavior is default-on.
+
+- Validate behavior in a sandbox wiki first.
+- If quality is acceptable, ship single-source splitting as the normal behavior rather than a permanent opt-in feature.
+
+Acceptance Criteria
+-------------------
+The spec is satisfied if:
+
+- one raw note can yield multiple atomic wiki pages
+- split decisions depend on reusable ideas rather than source-count
+- lecture notes are eligible for the same split behavior as any other source
+- the same raw source can appear on multiple child pages after a split
+- child pages can contain grounded synthesized notes
+- a 2-child topic page is allowed when the parent label is a strong, non-generic compression
+- generic parent labels are still rejected
+- query-time structural writes, when they occur, are narrow, grounded, and logged
+
+Non-Goals
+---------
+- forcing every long note to split
+- requiring heading-based extraction only
+- preserving source-shaped umbrella pages when they are not real atomic notes
+- turning query-time behavior into unrestricted whole-wiki maintenance

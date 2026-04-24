@@ -1003,6 +1003,25 @@ def _upsert_wiki_pages_for_note(*, title: str, body: str, raw_path: Path, page_r
             if other_slug != slug:
                 bw.connect_pages(loaded_pages, slug, other_slug)
 
+    api_key, model = _resolve_synthesis_config()
+    if api_key:
+        for slug in bw.ordered_unique(resolved_slugs):
+            page = loaded_pages.get(slug)
+            if page is None or bw.page_shape(page) == bw.PAGE_SHAPE_TOPIC or not page.sources:
+                continue
+            try:
+                split_decision = bw.analyze_page_for_atomic_split(page, api_key, model)
+            except Exception as exc:
+                print(f"Split analysis skipped for '{slug}': {exc}", file=sys.stderr)
+                continue
+            bw.apply_split_decision(
+                loaded_pages,
+                slug,
+                split_decision,
+                seed_kind="ingest",
+                allow_partial_source_coverage=True,
+            )
+
     bw.prune_generic_media_links(loaded_pages)
     bw.ensure_meaningful_connections(loaded_pages)
     bw.finalize_page_shapes(loaded_pages)

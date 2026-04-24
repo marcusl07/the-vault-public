@@ -573,6 +573,161 @@ class VaultPipelineTests(unittest.TestCase):
             frontmatter, _ = vp.parse_raw_note(raw_path)
             self.assertIn("integrated_at", frontmatter)
 
+    def test_ingest_realizes_split_by_converting_clean_parent_to_topic(self) -> None:
+        with isolated_env() as (_, raw_root, wiki_root, _):
+            raw_path = raw_root / "fruit-desserts-123.md"
+            raw_path.write_text(
+                vp.render_raw_file(
+                    capture_id="123",
+                    title="Fruit Desserts",
+                    created_at="2026-04-20T17:32:00Z",
+                    source_file="Fruit Desserts.md",
+                    body="One note about apple pie technique and berry tart structure.",
+                ),
+                encoding="utf-8",
+            )
+            decision = vp.bw.PageSplitDecision(
+                is_atomic=False,
+                candidate_satellite_slugs=["apple-pie", "berry-tart"],
+                rationale="This note contains two reusable dessert notes.",
+                candidate_evaluations=[
+                    vp.bw.SplitCandidateEvaluation(
+                        slug="apple-pie",
+                        accepted=True,
+                        grounding=["Apple pie filling and crust technique are described directly."],
+                        why_distinct="It is a standalone dessert with separate preparation concerns.",
+                        passes_direct_link_test=True,
+                        passes_stable_page_test=True,
+                        passes_search_test=True,
+                    ),
+                    vp.bw.SplitCandidateEvaluation(
+                        slug="berry-tart",
+                        accepted=True,
+                        grounding=["Berry tart assembly and texture cues are described directly."],
+                        why_distinct="It remains a distinct dessert page as more baking notes are added.",
+                        passes_direct_link_test=True,
+                        passes_stable_page_test=True,
+                        passes_search_test=True,
+                    ),
+                ],
+            )
+
+            with mock.patch.object(vp, "_resolve_synthesis_config", return_value=("token", "gemini-test")):
+                with mock.patch.object(vp.bw, "analyze_page_for_atomic_split", return_value=decision):
+                    result = vp.ingest_raw_notes([{"capture_id": "123", "raw_path": "raw/fruit-desserts-123.md"}])
+
+            self.assertEqual(result["integrated"], [{"capture_id": "123", "raw_path": "raw/fruit-desserts-123.md"}])
+            parent_text = (wiki_root / "fruit-desserts.md").read_text(encoding="utf-8")
+            self.assertIn("## Connections", parent_text)
+            self.assertIn("[[apple-pie]]", parent_text)
+            self.assertIn("[[berry-tart]]", parent_text)
+            self.assertNotIn("## Notes", parent_text)
+            self.assertNotIn("## Sources", parent_text)
+
+            apple_text = (wiki_root / "apple-pie.md").read_text(encoding="utf-8")
+            berry_text = (wiki_root / "berry-tart.md").read_text(encoding="utf-8")
+            self.assertIn("Apple pie filling and crust technique are described directly.", apple_text)
+            self.assertIn("Berry tart assembly and texture cues are described directly.", berry_text)
+            self.assertIn("[[fruit-desserts]]", apple_text)
+            self.assertIn("[[fruit-desserts]]", berry_text)
+
+    def test_ingest_realizes_split_by_deprecating_generic_parent_label(self) -> None:
+        with isolated_env() as (_, raw_root, wiki_root, _):
+            raw_path = raw_root / "recipe-123.md"
+            raw_path.write_text(
+                vp.render_raw_file(
+                    capture_id="123",
+                    title="Recipe",
+                    created_at="2026-04-20T17:32:00Z",
+                    source_file="Recipe.md",
+                    body="One note that really contains a pasta salad recipe and a roast chicken recipe.",
+                ),
+                encoding="utf-8",
+            )
+            decision = vp.bw.PageSplitDecision(
+                is_atomic=False,
+                candidate_satellite_slugs=["pasta-salad", "roast-chicken"],
+                rationale="This generic umbrella should split into concrete dishes.",
+                candidate_evaluations=[
+                    vp.bw.SplitCandidateEvaluation(
+                        slug="pasta-salad",
+                        accepted=True,
+                        grounding=["The source includes a distinct pasta salad ingredient list and method."],
+                        why_distinct="It can be reused independently from the roast chicken material.",
+                        passes_direct_link_test=True,
+                        passes_stable_page_test=True,
+                        passes_search_test=True,
+                    ),
+                    vp.bw.SplitCandidateEvaluation(
+                        slug="roast-chicken",
+                        accepted=True,
+                        grounding=["The source includes a separate roast chicken method and timing notes."],
+                        why_distinct="It remains useful as its own page as more cooking notes arrive.",
+                        passes_direct_link_test=True,
+                        passes_stable_page_test=True,
+                        passes_search_test=True,
+                    ),
+                ],
+            )
+
+            with mock.patch.object(vp, "_resolve_synthesis_config", return_value=("token", "gemini-test")):
+                with mock.patch.object(vp.bw, "analyze_page_for_atomic_split", return_value=decision):
+                    vp.ingest_raw_notes([{"capture_id": "123", "raw_path": "raw/recipe-123.md"}])
+
+            parent_text = (wiki_root / "recipe.md").read_text(encoding="utf-8")
+            self.assertIn("Deprecated: superseded by [[pasta-salad]] and [[roast-chicken]].", parent_text)
+            self.assertIn("[[pasta-salad]]", parent_text)
+            self.assertIn("[[roast-chicken]]", parent_text)
+
+    def test_ingest_realizes_split_while_preserving_atomic_parent_when_title_still_tracks_core_concept(self) -> None:
+        with isolated_env() as (_, raw_root, wiki_root, _):
+            raw_path = raw_root / "running-123.md"
+            raw_path.write_text(
+                vp.render_raw_file(
+                    capture_id="123",
+                    title="Running",
+                    created_at="2026-04-20T17:32:00Z",
+                    source_file="Running.md",
+                    body="A note covering running form and a running training plan.",
+                ),
+                encoding="utf-8",
+            )
+            decision = vp.bw.PageSplitDecision(
+                is_atomic=False,
+                candidate_satellite_slugs=["running-form", "running-plan"],
+                rationale="The parent can remain useful while linked child pages carry specific sub-areas.",
+                candidate_evaluations=[
+                    vp.bw.SplitCandidateEvaluation(
+                        slug="running-form",
+                        accepted=True,
+                        grounding=["The source has concrete cues about posture, cadence, and foot strike."],
+                        why_distinct="Form advice is reusable independently of planning advice.",
+                        passes_direct_link_test=True,
+                        passes_stable_page_test=True,
+                        passes_search_test=True,
+                    ),
+                    vp.bw.SplitCandidateEvaluation(
+                        slug="running-plan",
+                        accepted=True,
+                        grounding=["The source has a separate structure for weekly mileage and progression."],
+                        why_distinct="Training plans remain stable as separate notes over time.",
+                        passes_direct_link_test=True,
+                        passes_stable_page_test=True,
+                        passes_search_test=True,
+                    ),
+                ],
+            )
+
+            with mock.patch.object(vp, "_resolve_synthesis_config", return_value=("token", "gemini-test")):
+                with mock.patch.object(vp.bw, "analyze_page_for_atomic_split", return_value=decision):
+                    vp.ingest_raw_notes([{"capture_id": "123", "raw_path": "raw/running-123.md"}])
+
+            parent_text = (wiki_root / "running.md").read_text(encoding="utf-8")
+            self.assertIn("## Notes", parent_text)
+            self.assertIn("[Running](../raw/running-123.md)", parent_text)
+            self.assertIn("[[running-form]]", parent_text)
+            self.assertIn("[[running-plan]]", parent_text)
+
     def test_run_vault_pipeline_integrates_blank_body_meaningful_title_note(self) -> None:
         with isolated_env() as (_, raw_root, wiki_root, capture_root):
             note_path = capture_root / "i like eating grapes.md"

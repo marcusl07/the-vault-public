@@ -2132,6 +2132,109 @@ def gather_split_source_groups(page: Page, split_decision: PageSplitDecision) ->
     return source_groups, assigned_source_paths
 
 
+def split_candidate_evaluation_map(split_decision: PageSplitDecision) -> dict[str, SplitCandidateEvaluation]:
+    return {evaluation.slug: evaluation for evaluation in split_decision.candidate_evaluations if evaluation.accepted}
+
+
+def build_split_child_notes(split_decision: PageSplitDecision, child_slug: str) -> list[str]:
+    evaluation = split_candidate_evaluation_map(split_decision).get(child_slug)
+    if evaluation is None:
+        return []
+
+    notes: list[str] = []
+    for grounding in evaluation.grounding:
+        note = grounding.strip()
+        if note and note not in notes:
+            notes.append(note)
+    if evaluation.why_distinct and evaluation.why_distinct not in notes:
+        notes.append(evaluation.why_distinct)
+    return notes
+
+
+def page_title_is_source_shaped(page: Page) -> bool:
+    normalized_title = page.title.strip().lower().replace(" ", "-")
+    normalized_slug = page.slug.strip().lower()
+    if normalized_slug in GENERIC_BUCKET_SLUGS:
+        return True
+    if looks_like_archive(page.title):
+        return True
+    if re.fullmatch(r"(?:lecture|lec|week|chapter|notes?|misc|overview|summary)(?:-\d+)?", normalized_title):
+        return True
+    if re.fullmatch(r"(?:lecture|lec|week|chapter|notes?|misc|overview|summary)(?:-\d+)?", normalized_slug):
+        return True
+    return False
+
+
+def resolve_parent_split_mode(page: Page, child_slugs: list[str]) -> str:
+    if any(child_slug == page.slug or slug_similarity(child_slug, page.slug) >= 0.8 for child_slug in child_slugs):
+        return PAGE_SHAPE_ATOMIC
+    if not page_title_is_source_shaped(page) and len(child_slugs) >= 2:
+        return PAGE_SHAPE_TOPIC
+    if page_title_is_source_shaped(page):
+        return "deprecated"
+    return PAGE_SHAPE_ATOMIC
+
+
+def apply_split_decision(
+    pages: dict[str, Page],
+    parent_slug: str,
+    split_decision: PageSplitDecision,
+    *,
+    seed_kind: str = "migration",
+    allow_partial_source_coverage: bool = False,
+) -> bool:
+    parent_page = pages.get(parent_slug)
+    child_slugs = ordered_unique(split_decision.candidate_satellite_slugs)
+    if parent_page is None or split_decision.is_atomic or len(child_slugs) < 2:
+        return False
+
+    source_groups, assigned_source_paths = gather_split_source_groups(parent_page, split_decision)
+    if parent_page.sources and not allow_partial_source_coverage:
+        if len(parent_page.sources) > 1 and len(assigned_source_paths) != len(parent_page.sources):
+            return False
+        if len(parent_page.sources) > 1 and len(source_groups) < 2:
+            return False
+
+    parent_mode = resolve_parent_split_mode(parent_page, child_slugs)
+    if parent_mode == PAGE_SHAPE_TOPIC:
+        parent_page.shape = PAGE_SHAPE_TOPIC
+        parent_page.notes = []
+        parent_page.rendered_notes_markdown = None
+        parent_page.sources = {}
+        parent_page.connections = Counter()
+    elif parent_mode == "deprecated":
+        replacements = " and ".join(f"[[{slug}]]" for slug in child_slugs)
+        parent_page.shape = PAGE_SHAPE_ATOMIC
+        parent_page.notes = [f"Deprecated: superseded by {replacements}."]
+        parent_page.rendered_notes_markdown = None
+        parent_page.sources = {}
+        parent_page.connections = Counter()
+
+    for child_slug in child_slugs:
+        child_page = pages.setdefault(
+            child_slug,
+            Page(
+                slug=child_slug,
+                title=page_title(child_slug),
+                page_type=classify_page(child_slug, parent_page.title, seed_kind),
+                summary_hint=parent_page.title,
+            ),
+        )
+        child_page.shape = PAGE_SHAPE_ATOMIC
+        child_page.page_type = classify_page(child_slug, parent_page.title, seed_kind)
+        child_page.seed_kinds.add(seed_kind)
+        child_page.topic_parent = parent_slug if parent_mode == PAGE_SHAPE_TOPIC else None
+
+        for note in build_split_child_notes(split_decision, child_slug):
+            if note not in child_page.notes:
+                child_page.notes.append(note)
+        for source in source_groups.get(child_slug, []):
+            add_source_to_page(child_page, source, seed_kind)
+        connect_pages(pages, parent_slug, child_slug)
+
+    return True
+
+
 def migrate_pages_to_atomic_topics(
     pages: dict[str, Page],
     existing_pages: dict[str, ParsedWikiPage],
