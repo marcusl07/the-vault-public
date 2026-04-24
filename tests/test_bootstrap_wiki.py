@@ -725,6 +725,286 @@ class BootstrapWikiTests(unittest.TestCase):
         self.assertIn(source.path, pages["iterators"].sources)
         self.assertNotIn(source.path, pages["searching"].sources)
 
+    def test_apply_split_decision_is_stable_when_re_run_on_unchanged_source(self) -> None:
+        source = bw.SourceRecord(
+            label="ICS 33 Iterators and Generators",
+            path="../raw/ics33-week1.md",
+            status="local_only",
+            raw_content="",
+            cleaned_text="Iterators define traversal. Generators use yield to produce values lazily.",
+            fetched_summary=None,
+            detected_url=None,
+        )
+        pages = {
+            "lazy-sequences": bw.Page(
+                slug="lazy-sequences",
+                title="Lazy Sequences",
+                page_type="Concepts",
+                summary_hint="Lazy Sequences",
+                sources={source.path: source},
+            )
+        }
+        decision = bw.PageSplitDecision(
+            is_atomic=False,
+            candidate_satellite_slugs=["iterators", "generators"],
+            candidate_evaluations=[
+                bw.SplitCandidateEvaluation(
+                    slug="iterators",
+                    accepted=True,
+                    grounding=["Iterator protocol and traversal state."],
+                    why_distinct="Consumer-facing traversal interface.",
+                    passes_direct_link_test=True,
+                    passes_stable_page_test=True,
+                ),
+                bw.SplitCandidateEvaluation(
+                    slug="generators",
+                    accepted=True,
+                    grounding=["Yield-based lazy value production."],
+                    why_distinct="Producer-side lazy sequence construction.",
+                    passes_direct_link_test=True,
+                    passes_stable_page_test=True,
+                ),
+            ],
+        )
+
+        first = bw.apply_split_decision(pages, "lazy-sequences", decision, seed_kind="ingest", allow_partial_source_coverage=True)
+        snapshot = {
+            slug: (
+                page.shape,
+                tuple(page.notes),
+                tuple(sorted(page.sources)),
+                page.topic_parent,
+            )
+            for slug, page in sorted(pages.items())
+        }
+        second = bw.apply_split_decision(pages, "lazy-sequences", decision, seed_kind="ingest", allow_partial_source_coverage=True)
+        rerun_snapshot = {
+            slug: (
+                page.shape,
+                tuple(page.notes),
+                tuple(sorted(page.sources)),
+                page.topic_parent,
+            )
+            for slug, page in sorted(pages.items())
+        }
+
+        self.assertTrue(first)
+        self.assertTrue(second)
+        self.assertEqual(snapshot, rerun_snapshot)
+
+    def test_maybe_apply_query_time_split_fix_rewrites_only_affected_pages_and_logs(self) -> None:
+        source = bw.SourceRecord(
+            label="ICS 33 Iterators and Generators",
+            path="../raw/ics33-week1.md",
+            status="local_only",
+            raw_content="",
+            cleaned_text="Iterators define traversal. Generators use yield to produce values lazily.",
+            fetched_summary=None,
+            detected_url=None,
+        )
+        pages = {
+            "lazy-sequences": bw.Page(
+                slug="lazy-sequences",
+                title="Lazy Sequences",
+                page_type="Concepts",
+                summary_hint="Lazy Sequences",
+                sources={source.path: source},
+            )
+        }
+        decision = bw.PageSplitDecision(
+            is_atomic=False,
+            candidate_satellite_slugs=["iterators", "generators"],
+            candidate_evaluations=[
+                bw.SplitCandidateEvaluation(
+                    slug="iterators",
+                    accepted=True,
+                    grounding=["Iterator protocol and traversal state."],
+                    why_distinct="Consumer-facing traversal interface.",
+                    passes_direct_link_test=True,
+                    passes_stable_page_test=True,
+                ),
+                bw.SplitCandidateEvaluation(
+                    slug="generators",
+                    accepted=True,
+                    grounding=["Yield-based lazy value production."],
+                    why_distinct="Producer-side lazy sequence construction.",
+                    passes_direct_link_test=True,
+                    passes_stable_page_test=True,
+                ),
+            ],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            wiki_root = root / "wiki"
+            wiki_root.mkdir()
+            unrelated_page = bw.Page(
+                slug="coffee",
+                title="Coffee",
+                page_type="Concepts",
+                summary_hint="Coffee",
+            )
+            unrelated_page.notes = ["Lower heat makes moka pot coffee less bitter."]
+
+            with bw.temporary_workspace(root):
+                bw.atomic_write_text(wiki_root / "lazy-sequences.md", bw.render_page(pages["lazy-sequences"]))
+                bw.atomic_write_text(wiki_root / "coffee.md", bw.render_page(unrelated_page))
+                bw.atomic_write_text(wiki_root / "index.md", bw.render_index({**pages, "coffee": unrelated_page}))
+                bw.atomic_write_text(wiki_root / "log.md", "# Wiki Log\n")
+                unrelated_before = (wiki_root / "coffee.md").read_text(encoding="utf-8")
+
+                with mock.patch.object(bw, "atomic_write_text", wraps=bw.atomic_write_text) as write_mock:
+                    applied = bw.maybe_apply_query_time_split_fix(
+                        "lazy-sequences",
+                        split_decision=decision,
+                        mutation_note="split-adjacent query writeback",
+                    )
+
+                self.assertTrue(applied)
+                self.assertEqual(
+                    {Path(call.args[0]).name for call in write_mock.call_args_list},
+                    {"lazy-sequences.md", "iterators.md", "generators.md", "index.md", "log.md"},
+                )
+                self.assertEqual(unrelated_before, (wiki_root / "coffee.md").read_text(encoding="utf-8"))
+                log_text = (wiki_root / "log.md").read_text(encoding="utf-8")
+                index_text = (wiki_root / "index.md").read_text(encoding="utf-8")
+                self.assertIn("query | split-adjacent query writeback", log_text)
+                self.assertIn("lazy-sequences -> iterators, generators", log_text)
+                self.assertIn("[[iterators]]", index_text)
+                self.assertIn("[[generators]]", index_text)
+
+    def test_maybe_apply_query_time_split_fix_rejects_unstable_decisions(self) -> None:
+        source = bw.SourceRecord(
+            label="ICS 33 Iterators and Generators",
+            path="../raw/ics33-week1.md",
+            status="local_only",
+            raw_content="",
+            cleaned_text="Iterators define traversal. Generators use yield to produce values lazily.",
+            fetched_summary=None,
+            detected_url=None,
+        )
+        page = bw.Page(
+            slug="lazy-sequences",
+            title="Lazy Sequences",
+            page_type="Concepts",
+            summary_hint="Lazy Sequences",
+            sources={source.path: source},
+        )
+        decision = bw.PageSplitDecision(
+            is_atomic=False,
+            candidate_satellite_slugs=["iterators", "generators"],
+            candidate_evaluations=[
+                bw.SplitCandidateEvaluation(
+                    slug="iterators",
+                    accepted=True,
+                    grounding=["Iterator protocol and traversal state."],
+                    why_distinct="Consumer-facing traversal interface.",
+                    passes_direct_link_test=True,
+                    passes_stable_page_test=True,
+                ),
+                bw.SplitCandidateEvaluation(
+                    slug="generators",
+                    accepted=True,
+                    grounding=["Yield-based lazy value production."],
+                    why_distinct="Producer-side lazy sequence construction.",
+                    passes_direct_link_test=True,
+                    passes_stable_page_test=False,
+                ),
+            ],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            wiki_root = root / "wiki"
+            wiki_root.mkdir()
+
+            with bw.temporary_workspace(root):
+                bw.atomic_write_text(wiki_root / "lazy-sequences.md", bw.render_page(page))
+                bw.atomic_write_text(wiki_root / "index.md", bw.render_index({"lazy-sequences": page}))
+                bw.atomic_write_text(wiki_root / "log.md", "# Wiki Log\n")
+                parent_before = (wiki_root / "lazy-sequences.md").read_text(encoding="utf-8")
+                log_before = (wiki_root / "log.md").read_text(encoding="utf-8")
+
+                with mock.patch.object(bw, "atomic_write_text", wraps=bw.atomic_write_text) as write_mock:
+                    applied = bw.maybe_apply_query_time_split_fix("lazy-sequences", split_decision=decision)
+
+                self.assertFalse(applied)
+                self.assertEqual(write_mock.call_args_list, [])
+                self.assertEqual(parent_before, (wiki_root / "lazy-sequences.md").read_text(encoding="utf-8"))
+                self.assertEqual(log_before, (wiki_root / "log.md").read_text(encoding="utf-8"))
+                self.assertFalse((wiki_root / "iterators.md").exists())
+                self.assertFalse((wiki_root / "generators.md").exists())
+
+    def test_maybe_apply_query_time_split_fix_is_idempotent(self) -> None:
+        source = bw.SourceRecord(
+            label="ICS 33 Iterators and Generators",
+            path="../raw/ics33-week1.md",
+            status="local_only",
+            raw_content="",
+            cleaned_text="Iterators define traversal. Generators use yield to produce values lazily.",
+            fetched_summary=None,
+            detected_url=None,
+        )
+        page = bw.Page(
+            slug="lazy-sequences",
+            title="Lazy Sequences",
+            page_type="Concepts",
+            summary_hint="Lazy Sequences",
+            sources={source.path: source},
+        )
+        decision = bw.PageSplitDecision(
+            is_atomic=False,
+            candidate_satellite_slugs=["iterators", "generators"],
+            candidate_evaluations=[
+                bw.SplitCandidateEvaluation(
+                    slug="iterators",
+                    accepted=True,
+                    grounding=["Iterator protocol and traversal state."],
+                    why_distinct="Consumer-facing traversal interface.",
+                    passes_direct_link_test=True,
+                    passes_stable_page_test=True,
+                ),
+                bw.SplitCandidateEvaluation(
+                    slug="generators",
+                    accepted=True,
+                    grounding=["Yield-based lazy value production."],
+                    why_distinct="Producer-side lazy sequence construction.",
+                    passes_direct_link_test=True,
+                    passes_stable_page_test=True,
+                ),
+            ],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            wiki_root = root / "wiki"
+            wiki_root.mkdir()
+
+            with bw.temporary_workspace(root):
+                bw.atomic_write_text(wiki_root / "lazy-sequences.md", bw.render_page(page))
+                bw.atomic_write_text(wiki_root / "index.md", bw.render_index({"lazy-sequences": page}))
+                bw.atomic_write_text(wiki_root / "log.md", "# Wiki Log\n")
+
+                first = bw.maybe_apply_query_time_split_fix(
+                    "lazy-sequences",
+                    split_decision=decision,
+                    mutation_note="split-adjacent query writeback",
+                )
+                log_after_first = (wiki_root / "log.md").read_text(encoding="utf-8")
+
+                with mock.patch.object(bw, "atomic_write_text", wraps=bw.atomic_write_text) as write_mock:
+                    second = bw.maybe_apply_query_time_split_fix(
+                        "lazy-sequences",
+                        split_decision=decision,
+                        mutation_note="split-adjacent query writeback",
+                    )
+
+                self.assertTrue(first)
+                self.assertFalse(second)
+                self.assertEqual(write_mock.call_args_list, [])
+                self.assertEqual(log_after_first, (wiki_root / "log.md").read_text(encoding="utf-8"))
+                self.assertEqual(log_after_first.count("query | split-adjacent query writeback"), 1)
+
     def test_split_debug_output_includes_grounding_and_rejection_reasons(self) -> None:
         sources = [
             bw.SourceRecord(
@@ -781,6 +1061,80 @@ class BootstrapWikiTests(unittest.TestCase):
         self.assertIn("grounding: Only appears as a section heading.", output)
         self.assertIn("rejection_reasons: children are storage labels rather than durable ideas", output)
         self.assertIn("breakfast: rejected;", output)
+
+    def test_parse_page_split_response_collapses_overlapping_children(self) -> None:
+        content = """
+        {
+            "is_atomic": false,
+            "candidate_satellite_slugs": ["lazy-sequences", "lazy-sequence-notes", "generators"],
+            "candidate_evaluations": [
+                {
+                    "slug": "lazy-sequences",
+                    "accepted": true,
+                    "grounding": ["Reusable idea one."],
+                    "why_distinct": "Primary cluster.",
+                    "passes_direct_link_test": true,
+                    "passes_stable_page_test": true
+                },
+                {
+                    "slug": "lazy-sequence-notes",
+                    "accepted": true,
+                    "grounding": ["Near-duplicate cluster."],
+                    "why_distinct": "Too close to the first child.",
+                    "passes_direct_link_test": true,
+                    "passes_stable_page_test": true
+                },
+                {
+                    "slug": "generators",
+                    "accepted": true,
+                    "grounding": ["Reusable idea two."],
+                    "why_distinct": "Secondary cluster.",
+                    "passes_direct_link_test": true,
+                    "passes_stable_page_test": true
+                }
+            ]
+        }
+        """
+
+        decision = bw.parse_page_split_response(content, "lazy-sequences", {"../raw/ics33-week1.md"})
+
+        self.assertFalse(decision.is_atomic)
+        self.assertEqual(len(decision.candidate_satellite_slugs), 2)
+        self.assertIn("generators", decision.candidate_satellite_slugs)
+        self.assertTrue(
+            {"lazy-sequences", "lazy-sequence-notes"}.intersection(decision.candidate_satellite_slugs)
+        )
+
+    def test_parse_page_split_response_rejects_overlapping_child_set_that_collapses_to_one(self) -> None:
+        content = """
+        {
+            "is_atomic": false,
+            "candidate_satellite_slugs": ["iterators", "iterator-notes"],
+            "candidate_evaluations": [
+                {
+                    "slug": "iterators",
+                    "accepted": true,
+                    "grounding": ["Reusable idea one."],
+                    "why_distinct": "Primary cluster.",
+                    "passes_direct_link_test": true,
+                    "passes_stable_page_test": true
+                },
+                {
+                    "slug": "iterator-notes",
+                    "accepted": true,
+                    "grounding": ["Near-duplicate cluster."],
+                    "why_distinct": "Too close to the first child.",
+                    "passes_direct_link_test": true,
+                    "passes_stable_page_test": true
+                }
+            ]
+        }
+        """
+
+        decision = bw.parse_page_split_response(content, "lazy-sequences", {"../raw/ics33-week1.md"})
+
+        self.assertTrue(decision.is_atomic)
+        self.assertIn("overlapping child set collapsed below split threshold", decision.rejection_reasons)
 
     def test_mixed_umbrella_and_satellite_sources_convert_existing_slug_to_topic(self) -> None:
         sources = [

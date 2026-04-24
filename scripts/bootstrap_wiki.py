@@ -889,6 +889,13 @@ def stage_rendered_wiki(
     return RENDER_STAGE_ROOT
 
 
+def append_wiki_query_log(summary: str) -> None:
+    log_path = WIKI_ROOT / "log.md"
+    existing = log_path.read_text(encoding="utf-8") if log_path.exists() else "# Wiki Log\n"
+    entry = f"## [{TODAY}] query | {summary}"
+    atomic_write_text(log_path, existing.rstrip() + "\n\n" + entry + "\n")
+
+
 def swap_rendered_wiki(stage_dir: Path) -> None:
     backup_dir = RENDER_BACKUP_ROOT
     if backup_dir.exists():
@@ -1404,11 +1411,44 @@ def parse_page_split_response(content: str, parent_slug: str, source_paths: set[
             continue
         source_assignments[source_path] = satellite_slug
 
+    def slugs_overlap_too_much(left: str, right: str) -> bool:
+        left_base = left.rstrip("s")
+        right_base = right.rstrip("s")
+        if left == right:
+            return True
+        if left in right or right in left:
+            return True
+        if left_base and right_base and (left_base in right_base or right_base in left_base):
+            return True
+        if slug_similarity(left, right) >= 0.8:
+            return True
+        return False
+
+    def collapse_overlapping_candidates(slugs: list[str]) -> list[str]:
+        merged: list[str] = []
+        for slug in slugs:
+            if any(slugs_overlap_too_much(slug, existing) for existing in merged):
+                continue
+            merged.append(slug)
+        return merged
+
+    candidate_slugs = collapse_overlapping_candidates(candidate_slugs)
+
     if is_atomic:
         return PageSplitDecision(
             is_atomic=True,
             rationale=rationale,
             rejection_reasons=rejection_reasons,
+            candidate_evaluations=candidate_evaluations,
+        )
+    if len(candidate_slugs) < 2:
+        return PageSplitDecision(
+            is_atomic=True,
+            rationale=rationale,
+            rejection_reasons=[
+                *rejection_reasons,
+                "overlapping child set collapsed below split threshold",
+            ],
             candidate_evaluations=candidate_evaluations,
         )
     return PageSplitDecision(
@@ -2264,6 +2304,133 @@ def apply_split_decision(
             add_source_to_page(child_page, source, seed_kind)
         connect_pages(pages, parent_slug, child_slug)
 
+    return True
+
+
+def apply_query_time_split_fix(
+    pages: dict[str, Page],
+    parent_slug: str,
+    split_decision: PageSplitDecision,
+    *,
+    seed_kind: str = "query",
+) -> bool:
+    parent_page = pages.get(parent_slug)
+    child_slugs = ordered_unique(split_decision.candidate_satellite_slugs)
+    if parent_page is None or split_decision.is_atomic or len(child_slugs) < 2:
+        return False
+
+    evaluation_map = {evaluation.slug: evaluation for evaluation in split_decision.candidate_evaluations}
+    for child_slug in child_slugs:
+        evaluation = evaluation_map.get(child_slug)
+        if evaluation is None or not evaluation.accepted:
+            return False
+        if not evaluation.grounding:
+            return False
+        if not evaluation.passes_direct_link_test or not evaluation.passes_stable_page_test:
+            return False
+
+    source_groups, assigned_source_paths = gather_split_source_groups(parent_page, split_decision)
+    if parent_page.sources and len(parent_page.sources) > 1:
+        if len(assigned_source_paths) != len(parent_page.sources) or len(source_groups) < 2:
+            return False
+
+    parent_mode = resolve_parent_split_mode(parent_page, child_slugs)
+    if parent_mode == PAGE_SHAPE_TOPIC:
+        parent_page.shape = PAGE_SHAPE_TOPIC
+        parent_page.notes = []
+        parent_page.rendered_notes_markdown = None
+        parent_page.sources = {}
+        parent_page.connections = Counter()
+    elif parent_mode == "deprecated":
+        replacements = " and ".join(f"[[{slug}]]" for slug in child_slugs)
+        parent_page.shape = PAGE_SHAPE_ATOMIC
+        parent_page.notes = [f"Deprecated: superseded by {replacements}."]
+        parent_page.rendered_notes_markdown = None
+        parent_page.sources = {}
+        parent_page.connections = Counter()
+
+    for child_slug in child_slugs:
+        child_page = pages.setdefault(
+            child_slug,
+            Page(
+                slug=child_slug,
+                title=page_title(child_slug),
+                page_type=classify_page(child_slug, parent_page.title, seed_kind),
+                summary_hint=parent_page.title,
+            ),
+        )
+        child_page.shape = PAGE_SHAPE_ATOMIC
+        child_page.page_type = classify_page(child_slug, parent_page.title, seed_kind)
+        child_page.seed_kinds.add(seed_kind)
+        child_page.topic_parent = parent_slug if parent_mode == PAGE_SHAPE_TOPIC else None
+
+        for note in build_split_child_notes(split_decision, child_slug):
+            if note not in child_page.notes:
+                child_page.notes.append(note)
+        for source in source_groups.get(child_slug, []):
+            add_source_to_page(child_page, source, seed_kind)
+        connect_pages(pages, parent_slug, child_slug)
+    return True
+
+
+def maybe_apply_query_time_split_fix(
+    parent_slug: str,
+    *,
+    split_decision: PageSplitDecision | None = None,
+    api_key: str | None = None,
+    model: str = "gemini-2.5-flash",
+    mutation_note: str = "query-time split fix",
+) -> bool:
+    parent_path = WIKI_ROOT / f"{parent_slug}.md"
+    if not parent_path.exists():
+        return False
+
+    pages = {slug: parsed_page_to_page(parsed) for slug, parsed in load_existing_wiki_pages().items()}
+    parent_page = pages.get(parent_slug)
+    if parent_page is None:
+        return False
+
+    effective_split_decision = split_decision or analyze_page_for_atomic_split(parent_page, api_key, model)
+    child_slugs = ordered_unique(effective_split_decision.candidate_satellite_slugs)
+    touched_slugs = {parent_slug, *child_slugs}
+    before_page_text = {
+        slug: (WIKI_ROOT / f"{slug}.md").read_text(encoding="utf-8")
+        if (WIKI_ROOT / f"{slug}.md").exists()
+        else None
+        for slug in touched_slugs
+    }
+    index_path = WIKI_ROOT / "index.md"
+    before_index_text = index_path.read_text(encoding="utf-8") if index_path.exists() else None
+
+    applied = apply_query_time_split_fix(
+        pages,
+        parent_slug,
+        effective_split_decision,
+        seed_kind="query",
+    )
+    if not applied:
+        return False
+
+    changed_page_slugs: list[str] = []
+    for slug in sorted(touched_slugs):
+        page = pages.get(slug)
+        if page is None:
+            continue
+        rendered = render_page(page)
+        if before_page_text.get(slug) == rendered:
+            continue
+        atomic_write_text(WIKI_ROOT / f"{slug}.md", rendered)
+        changed_page_slugs.append(slug)
+
+    rendered_index = render_index(pages)
+    index_changed = before_index_text != rendered_index
+    if not changed_page_slugs:
+        return False
+
+    if index_changed:
+        atomic_write_text(index_path, rendered_index)
+
+    append_wiki_query_log(f"{mutation_note} — {parent_slug} -> {', '.join(child_slugs[:8])}")
     return True
 
 
