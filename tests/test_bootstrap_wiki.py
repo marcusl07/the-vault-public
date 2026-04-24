@@ -486,6 +486,177 @@ class BootstrapWikiTests(unittest.TestCase):
         self.assertEqual(pages["backpack"].topic_parent, "travel-bags")
         self.assertIn("backpack", bw.sorted_connection_slugs(pages["travel-bags"]))
 
+    def test_parse_page_split_response_keeps_single_source_candidate_debug(self) -> None:
+        content = """
+        {
+          "is_atomic": false,
+          "rationale": "One lecture note substantively covers two reusable concepts.",
+          "rejection_reasons": [],
+          "candidate_satellite_slugs": ["iterators", "generators"],
+          "candidate_evaluations": [
+            {
+              "slug": "iterators",
+              "accepted": true,
+              "grounding": ["Defines iterator protocol and traversal behavior."],
+              "why_distinct": "Focuses on the consumer-side iteration interface.",
+              "passes_direct_link_test": true,
+              "passes_stable_page_test": true,
+              "passes_search_test": true,
+              "rejection_reasons": []
+            },
+            {
+              "slug": "generators",
+              "accepted": true,
+              "grounding": ["Explains yield-based lazy sequence construction."],
+              "why_distinct": "Focuses on producing iterator values lazily.",
+              "passes_direct_link_test": true,
+              "passes_stable_page_test": true,
+              "passes_search_test": true,
+              "rejection_reasons": []
+            },
+            {
+              "slug": "week-1",
+              "accepted": false,
+              "grounding": ["Appears only as a lecture heading."],
+              "why_distinct": "It is just a source-shaped section label.",
+              "passes_direct_link_test": false,
+              "passes_stable_page_test": false,
+              "passes_search_test": false,
+              "rejection_reasons": ["source-shaped bucket"]
+            }
+          ],
+          "source_assignments": []
+        }
+        """
+
+        decision = bw.parse_page_split_response(content, "ics-33", {"../raw/ics33-week1.md"})
+
+        self.assertFalse(decision.is_atomic)
+        self.assertEqual(decision.candidate_satellite_slugs, ["iterators", "generators"])
+        self.assertEqual(decision.rationale, "One lecture note substantively covers two reusable concepts.")
+        self.assertEqual(len(decision.candidate_evaluations), 3)
+        self.assertEqual(decision.candidate_evaluations[0].grounding, ["Defines iterator protocol and traversal behavior."])
+        self.assertEqual(decision.candidate_evaluations[2].rejection_reasons, ["source-shaped bucket"])
+        self.assertEqual(decision.source_assignments, {})
+
+    def test_analyze_page_for_atomic_split_requests_debuggable_single_source_schema(self) -> None:
+        source = bw.SourceRecord(
+            label="ICS 33 Iterators and Generators",
+            path="../raw/ics33-week1.md",
+            status="local_only",
+            raw_content="",
+            cleaned_text="Iterators define traversal. Generators use yield to produce values lazily.",
+            fetched_summary=None,
+            detected_url=None,
+        )
+        page = bw.Page(
+            slug="ics-33",
+            title="ICS 33",
+            page_type="Concepts",
+            summary_hint="ICS 33",
+            sources={source.path: source},
+        )
+        page.rendered_notes_markdown = "### Iterators\n- Traversal protocol.\n### Generators\n- Yield-based lazy production."
+
+        llm_payload = """
+        {
+          "is_atomic": false,
+          "rationale": "This single source contains two independently reusable ideas.",
+          "rejection_reasons": [],
+          "candidate_satellite_slugs": ["iterators", "generators"],
+          "candidate_evaluations": [
+            {
+              "slug": "iterators",
+              "accepted": true,
+              "grounding": ["Traversal protocol and StopIteration behavior."],
+              "why_distinct": "Consumers of iterable state.",
+              "passes_direct_link_test": true,
+              "passes_stable_page_test": true,
+              "passes_search_test": true,
+              "rejection_reasons": []
+            },
+            {
+              "slug": "generators",
+              "accepted": true,
+              "grounding": ["Yield-based lazy production and generator objects."],
+              "why_distinct": "Producer-side abstraction for lazy sequences.",
+              "passes_direct_link_test": true,
+              "passes_stable_page_test": true,
+              "passes_search_test": true,
+              "rejection_reasons": []
+            }
+          ],
+          "source_assignments": []
+        }
+        """
+
+        with mock.patch.object(bw, "gemini_generate", return_value=llm_payload) as generate_mock:
+            decision = bw.analyze_page_for_atomic_split(page, api_key="token", model="gemini-test")
+
+        kwargs = generate_mock.call_args.kwargs
+        self.assertIn("Do not require multiple source files.", kwargs["messages"][1]["content"])
+        self.assertIn("candidate_evaluations", kwargs["response_schema"]["required"])
+        self.assertFalse(decision.is_atomic)
+        self.assertEqual(decision.candidate_satellite_slugs, ["iterators", "generators"])
+        self.assertEqual(decision.candidate_evaluations[0].slug, "iterators")
+
+    def test_split_debug_output_includes_grounding_and_rejection_reasons(self) -> None:
+        sources = [
+            bw.SourceRecord(
+                label="Pesto Eggs",
+                path="../raw/pesto-eggs.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Recipe note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+            bw.SourceRecord(
+                label="Vodka Pasta",
+                path="../raw/vodka-pasta.md",
+                status="local_only",
+                raw_content="",
+                cleaned_text="Recipe note.",
+                fetched_summary=None,
+                detected_url=None,
+            ),
+        ]
+        page = bw.Page(
+            slug="recipe",
+            title="Recipe",
+            page_type="Concepts",
+            summary_hint="Recipe",
+            sources={source.path: source for source in sources},
+        )
+        pages = {"recipe": page}
+        decision = bw.PageSplitDecision(
+            is_atomic=True,
+            rationale="The page still behaves like one recipe collection note.",
+            rejection_reasons=["children are storage labels rather than durable ideas"],
+            candidate_evaluations=[
+                bw.SplitCandidateEvaluation(
+                    slug="breakfast",
+                    accepted=False,
+                    grounding=["Only appears as a section heading."],
+                    why_distinct="Meal time is not the durable concept here.",
+                    rejection_reasons=["generic bucket"],
+                )
+            ],
+        )
+
+        with mock.patch.dict("os.environ", {"BOOTSTRAP_SPLIT_DEBUG": "1"}, clear=False):
+            with mock.patch.object(bw, "split_preflight_check", return_value=(True, None)):
+                with mock.patch.object(bw, "analyze_page_for_atomic_split", return_value=decision):
+                    stderr = StringIO()
+                    with redirect_stderr(stderr):
+                        bw.migrate_pages_to_atomic_topics(pages, {}, api_key="token")
+
+        output = stderr.getvalue()
+        self.assertIn("Split debug [recipe]", output)
+        self.assertIn("grounding: Only appears as a section heading.", output)
+        self.assertIn("rejection_reasons: children are storage labels rather than durable ideas", output)
+        self.assertIn("breakfast: rejected;", output)
+
     def test_mixed_umbrella_and_satellite_sources_convert_existing_slug_to_topic(self) -> None:
         sources = [
             bw.SourceRecord(

@@ -213,10 +213,25 @@ class FetchResult:
 
 
 @dataclass
+class SplitCandidateEvaluation:
+    slug: str
+    accepted: bool = False
+    grounding: list[str] = field(default_factory=list)
+    why_distinct: str | None = None
+    passes_direct_link_test: bool = False
+    passes_stable_page_test: bool = False
+    passes_search_test: bool = False
+    rejection_reasons: list[str] = field(default_factory=list)
+
+
+@dataclass
 class PageSplitDecision:
     is_atomic: bool
     candidate_satellite_slugs: list[str] = field(default_factory=list)
     source_assignments: dict[str, str] = field(default_factory=dict)
+    rationale: str | None = None
+    rejection_reasons: list[str] = field(default_factory=list)
+    candidate_evaluations: list[SplitCandidateEvaluation] = field(default_factory=list)
 
 
 @dataclass
@@ -1263,16 +1278,28 @@ def build_page_split_messages(page: Page) -> list[dict[str, str]]:
                     "Task:",
                     "1. Decide whether this page should stay as a single reusable note.",
                     "2. If it should split, extract concise reusable kebab-case satellite slugs for the distinct notes.",
-                    "3. If it should split, include source assignments when they are clear and natural.",
+                    "3. For each proposed child, evaluate whether it is worth linking to directly and whether it would remain a stable page as more detail is added.",
+                    "4. If it should split, include source assignments when they are clear and natural.",
                     "Rules:",
+                    "- Do not require multiple source files. One raw source may support multiple child pages when it substantively grounds each child.",
                     "- Return is_atomic=true when this still feels like one note a real Zettelkasten user would keep together.",
                     "- Do not split just because one lecture note contains several related subtopics.",
                     "- Return is_atomic=false when the page is clearly a bucket containing multiple standalone notes.",
                     "- Do not return the parent slug.",
                     "- Do not return generic buckets like notes, ideas, resources, archive, misc, or overview.",
                     "- Prefer stable concept/entity/experience slugs that could stand as atomic pages.",
+                    "- If a candidate child fails the reusable-idea test, explain the rejection reason instead of including it as an accepted child.",
+                    "- Each accepted child must have enough grounded support to justify at least one meaningful note, not just a passing mention.",
                     "- If the page is atomic, return an empty candidate_satellite_slugs array and an empty source_assignments array.",
                     "- source_assignments may be partial when some source-to-note mapping is ambiguous.",
+                    "- When source_assignments are ambiguous or the page has only one source, leave source_assignments empty rather than inventing ownership.",
+                    "Return JSON fields:",
+                    "- is_atomic: boolean",
+                    "- rationale: short string",
+                    "- rejection_reasons: array of short strings explaining why the page stays atomic or why a proposed split is rejected",
+                    "- candidate_satellite_slugs: array of accepted kebab-case child slugs only",
+                    "- candidate_evaluations: array of objects with slug, accepted, grounding, why_distinct, passes_direct_link_test, passes_stable_page_test, passes_search_test, rejection_reasons",
+                    "- source_assignments: array of {source_path, satellite_slug}",
                     "Full page note content:",
                     note_content,
                     "Sources:",
@@ -1297,10 +1324,19 @@ def parse_page_split_response(content: str, parent_slug: str, source_paths: set[
         payload = json.loads(match.group(0))
 
     is_atomic = bool(payload.get("is_atomic", False))
+    rationale_value = payload.get("rationale")
+    rationale = str(rationale_value).strip() if isinstance(rationale_value, str) and rationale_value.strip() else None
+    raw_rejection_reasons = payload.get("rejection_reasons", [])
     raw_candidates = payload.get("candidate_satellite_slugs", [])
+    raw_candidate_evaluations = payload.get("candidate_evaluations", [])
     raw_assignments = payload.get("source_assignments", [])
 
-    if not isinstance(raw_candidates, list) or not isinstance(raw_assignments, list):
+    if (
+        not isinstance(raw_candidates, list)
+        or not isinstance(raw_candidate_evaluations, list)
+        or not isinstance(raw_assignments, list)
+        or not isinstance(raw_rejection_reasons, list)
+    ):
         raise ValueError("Split response missing expected arrays.")
 
     candidate_slugs: list[str] = []
@@ -1311,6 +1347,44 @@ def parse_page_split_response(content: str, parent_slug: str, source_paths: set[
             continue
         seen_candidates.add(slug)
         candidate_slugs.append(slug)
+
+    rejection_reasons = [str(item).strip() for item in raw_rejection_reasons if str(item).strip()]
+    candidate_evaluations: list[SplitCandidateEvaluation] = []
+    seen_evaluation_slugs: set[str] = set()
+    for item in raw_candidate_evaluations:
+        if not isinstance(item, dict):
+            continue
+        slug = clean_component(str(item.get("slug", "")).strip()) or slugify(str(item.get("slug", "")).strip())
+        if not slug or slug == parent_slug or slug in seen_evaluation_slugs:
+            continue
+        seen_evaluation_slugs.add(slug)
+        grounding = [str(entry).strip() for entry in item.get("grounding", []) if str(entry).strip()]
+        why_distinct_value = item.get("why_distinct")
+        why_distinct = (
+            str(why_distinct_value).strip()
+            if isinstance(why_distinct_value, str) and str(why_distinct_value).strip()
+            else None
+        )
+        candidate_evaluations.append(
+            SplitCandidateEvaluation(
+                slug=slug,
+                accepted=bool(item.get("accepted", False)),
+                grounding=grounding,
+                why_distinct=why_distinct,
+                passes_direct_link_test=bool(item.get("passes_direct_link_test", False)),
+                passes_stable_page_test=bool(item.get("passes_stable_page_test", False)),
+                passes_search_test=bool(item.get("passes_search_test", False)),
+                rejection_reasons=[
+                    str(reason).strip() for reason in item.get("rejection_reasons", []) if str(reason).strip()
+                ],
+            )
+        )
+
+    if not candidate_slugs:
+        for evaluation in candidate_evaluations:
+            if evaluation.accepted and evaluation.slug not in seen_candidates:
+                seen_candidates.add(evaluation.slug)
+                candidate_slugs.append(evaluation.slug)
 
     source_assignments: dict[str, str] = {}
     for item in raw_assignments:
@@ -1331,11 +1405,19 @@ def parse_page_split_response(content: str, parent_slug: str, source_paths: set[
         source_assignments[source_path] = satellite_slug
 
     if is_atomic:
-        return PageSplitDecision(is_atomic=True)
+        return PageSplitDecision(
+            is_atomic=True,
+            rationale=rationale,
+            rejection_reasons=rejection_reasons,
+            candidate_evaluations=candidate_evaluations,
+        )
     return PageSplitDecision(
         is_atomic=False,
         candidate_satellite_slugs=candidate_slugs,
         source_assignments=source_assignments,
+        rationale=rationale,
+        rejection_reasons=rejection_reasons,
+        candidate_evaluations=candidate_evaluations,
     )
 
 
@@ -1358,6 +1440,43 @@ def split_request_attempts() -> int:
         return max(1, int(raw_value))
     except ValueError:
         return 2
+
+
+def split_debug_enabled() -> bool:
+    raw_value = os.environ.get("BOOTSTRAP_SPLIT_DEBUG", "").strip().lower()
+    return raw_value in {"1", "true", "yes", "on"}
+
+
+def format_split_decision_debug(page: Page, split_decision: PageSplitDecision) -> str:
+    lines = [f"Split debug [{page.slug}]"]
+    if split_decision.rationale:
+        lines.append(f"  rationale: {split_decision.rationale}")
+    if split_decision.rejection_reasons:
+        lines.append(f"  rejection_reasons: {', '.join(split_decision.rejection_reasons)}")
+    if split_decision.candidate_satellite_slugs:
+        lines.append(f"  accepted_children: {', '.join(split_decision.candidate_satellite_slugs)}")
+    if not split_decision.candidate_evaluations:
+        lines.append("  candidate_evaluations: [none]")
+        return "\n".join(lines)
+
+    lines.append("  candidate_evaluations:")
+    for evaluation in split_decision.candidate_evaluations:
+        status = "accepted" if evaluation.accepted else "rejected"
+        tests = ", ".join(
+            [
+                f"direct_link={'yes' if evaluation.passes_direct_link_test else 'no'}",
+                f"stable_page={'yes' if evaluation.passes_stable_page_test else 'no'}",
+                f"search={'yes' if evaluation.passes_search_test else 'no'}",
+            ]
+        )
+        lines.append(f"    - {evaluation.slug}: {status}; {tests}")
+        if evaluation.why_distinct:
+            lines.append(f"      why_distinct: {evaluation.why_distinct}")
+        if evaluation.grounding:
+            lines.append(f"      grounding: {' | '.join(evaluation.grounding)}")
+        if evaluation.rejection_reasons:
+            lines.append(f"      rejection_reasons: {', '.join(evaluation.rejection_reasons)}")
+    return "\n".join(lines)
 
 
 def split_counts_toward_transport_abort(error: Exception) -> bool:
@@ -1409,12 +1528,56 @@ def analyze_page_for_atomic_split(page: Page, api_key: str | None, model: str) -
         model=model,
         response_schema={
             "type": "OBJECT",
-            "required": ["is_atomic", "candidate_satellite_slugs", "source_assignments"],
+            "required": [
+                "is_atomic",
+                "rationale",
+                "rejection_reasons",
+                "candidate_satellite_slugs",
+                "candidate_evaluations",
+                "source_assignments",
+            ],
             "properties": {
                 "is_atomic": {"type": "BOOLEAN"},
+                "rationale": {"type": "STRING"},
+                "rejection_reasons": {
+                    "type": "ARRAY",
+                    "items": {"type": "STRING"},
+                },
                 "candidate_satellite_slugs": {
                     "type": "ARRAY",
                     "items": {"type": "STRING"},
+                },
+                "candidate_evaluations": {
+                    "type": "ARRAY",
+                    "items": {
+                        "type": "OBJECT",
+                        "required": [
+                            "slug",
+                            "accepted",
+                            "grounding",
+                            "why_distinct",
+                            "passes_direct_link_test",
+                            "passes_stable_page_test",
+                            "passes_search_test",
+                            "rejection_reasons",
+                        ],
+                        "properties": {
+                            "slug": {"type": "STRING"},
+                            "accepted": {"type": "BOOLEAN"},
+                            "grounding": {
+                                "type": "ARRAY",
+                                "items": {"type": "STRING"},
+                            },
+                            "why_distinct": {"type": "STRING"},
+                            "passes_direct_link_test": {"type": "BOOLEAN"},
+                            "passes_stable_page_test": {"type": "BOOLEAN"},
+                            "passes_search_test": {"type": "BOOLEAN"},
+                            "rejection_reasons": {
+                                "type": "ARRAY",
+                                "items": {"type": "STRING"},
+                            },
+                        },
+                    },
                 },
                 "source_assignments": {
                     "type": "ARRAY",
@@ -2036,6 +2199,8 @@ def migrate_pages_to_atomic_topics(
             split_decision = analyze_page_for_atomic_split(page, api_key, model)
             report.analyzed_pages += 1
             consecutive_failures = 0
+            if split_debug_enabled():
+                print(format_split_decision_debug(page, split_decision), file=sys.stderr)
         except (HTTPError, URLError, TimeoutError, socket.timeout, json.JSONDecodeError, ValueError) as error:
             report.failed_pages += 1
             detail = f"{slug}: {type(error).__name__}: {error}"
