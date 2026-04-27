@@ -7,6 +7,10 @@ import sys
 import tempfile
 from unittest import mock
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 try:
     from scripts import bootstrap_wiki as bw
 except ModuleNotFoundError:  # pragma: no cover - direct script execution path

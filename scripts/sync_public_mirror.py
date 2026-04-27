@@ -49,14 +49,14 @@ def sync_tree(source_root: Path, dest_root: Path) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, target)
 
-    for path in dest_root.rglob("*"):
-        if path.is_dir():
-            continue
+    for path in sorted(dest_root.rglob("*"), key=lambda item: len(item.parts), reverse=True):
         relative = path.relative_to(dest_root)
         if relative.parts and relative.parts[0] == ".git":
             continue
-        if relative not in expected_paths:
+        if path.is_file() and relative not in expected_paths:
             path.unlink()
+        elif path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
 
 
 def main() -> int:

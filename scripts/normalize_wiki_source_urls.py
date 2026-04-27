@@ -9,14 +9,17 @@ from typing import Iterable
 
 try:
     from scripts import vault_pipeline as vp
+    from scripts.bootstrap_wiki_parsing import parse_markdown_source_link
+    from scripts.bootstrap_wiki_rendering import format_markdown_link_target
 except ModuleNotFoundError:  # pragma: no cover - direct script execution path
     import vault_pipeline as vp
+    from bootstrap_wiki_parsing import parse_markdown_source_link
+    from bootstrap_wiki_rendering import format_markdown_link_target
 
 
 ROOT = Path(__file__).resolve().parent.parent
 WIKI_ROOT = ROOT / "wiki"
 
-SOURCE_LINE_RE = re.compile(r"^(?P<indent>\s*-\s)\[(?P<label>[^\]]+)\]\((?P<target>[^)]+)\)(?P<suffix>.*)$")
 MARKDOWN_URL_RE = re.compile(r"\[[^\]]*?\]\((https?://[^)\s>]+)\)")
 HTML_HREF_RE = re.compile(r"""href=["'](https?://[^"'<>]+)["']""")
 BARE_URL_RE = re.compile(r"(?<![\w@])https?://[^\s<>)\]]+")
@@ -96,11 +99,12 @@ def plan_rewrites() -> tuple[list[Rewrite], list[Skip]]:
             if not line.strip():
                 continue
 
-            match = SOURCE_LINE_RE.match(line)
-            if not match:
+            indent_match = re.match(r"^(?P<indent>\s*)", line)
+            parsed_link = parse_markdown_source_link(line)
+            if parsed_link is None:
                 continue
+            current_label, target, suffix = parsed_link
 
-            target = match.group("target")
             if "/raw/" not in target and not target.startswith("raw/") and not target.startswith("../raw/"):
                 continue
 
@@ -120,11 +124,11 @@ def plan_rewrites() -> tuple[list[Rewrite], list[Skip]]:
 
             chosen_url = urls[0]
             desired_label = normalize_visible_label(chosen_url)
-            current_label = match.group("label")
             if current_label == desired_label:
                 continue
 
-            after = f"{match.group('indent')}[{desired_label}]({target}){match.group('suffix')}"
+            indent = indent_match.group("indent") if indent_match is not None else ""
+            after = f"{indent}- [{desired_label}]({format_markdown_link_target(target)}){suffix}"
             rewrites.append(
                 Rewrite(
                     wiki_path=wiki_path,

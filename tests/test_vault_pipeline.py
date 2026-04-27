@@ -133,6 +133,36 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertEqual(decision.target_pages, ["topic-a"])
             self.assertFalse(decision.new_page_signal)
 
+    def test_router_escalates_single_existing_atomic_page_with_conflicting_note(self) -> None:
+        with isolated_env() as (_, _, wiki_root, _):
+            (wiki_root / "coffee-preferences.md").write_text(
+                "\n".join(
+                    [
+                        "# Coffee Preferences",
+                        "",
+                        "## Notes",
+                        "",
+                        "- Marcus prefers pourover over espresso at home.",
+                        "",
+                        "## Connections",
+                        "",
+                        "- [[coffee]]",
+                        "",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            decision = vp._route_source_update(
+                title="Coffee Preferences",
+                body="Marcus prefers espresso over pourover at home.",
+                page_assignments=[("coffee-preferences", "title")],
+            )
+
+            self.assertEqual(decision.action, "heavy_update")
+            self.assertEqual(decision.contradiction_risk, "high")
+
     def test_router_marks_new_page_as_heavy_update(self) -> None:
         with isolated_env():
             decision = vp._route_source_update(
@@ -336,6 +366,269 @@ class VaultPipelineTests(unittest.TestCase):
             review_text = (wiki_root / "review.md").read_text(encoding="utf-8")
             self.assertIn("contradiction | home-brew-method", review_text)
             self.assertIn("[../sources/chat/", review_text)
+
+    def test_query_writeback_chat_fact_supersession_resolves_existing_review_entry(self) -> None:
+        with isolated_env() as (_, _, wiki_root, _):
+            vp.query_writeback_chat_fact(
+                page_title="Coffee Preferences",
+                note="Marcus prefers pourover over espresso at home.",
+                related_pages=["coffee"],
+                created_at="2026-04-23T10:00:00Z",
+                conversation_ref="chat:2026-04-23T10:00:00Z",
+                fact_key="home-brew-method",
+            )
+            vp.query_writeback_chat_fact(
+                page_title="Coffee Preferences",
+                note="Marcus prefers espresso over pourover at home.",
+                related_pages=["coffee"],
+                created_at="2026-04-23T11:00:00Z",
+                conversation_ref="chat:2026-04-23T11:00:00Z",
+                fact_key="home-brew-method",
+            )
+
+            result = vp.query_writeback_chat_fact(
+                page_title="Coffee Preferences",
+                note="Marcus now prefers espresso over pourover at home.",
+                related_pages=["coffee"],
+                created_at="2026-04-23T12:00:00Z",
+                conversation_ref="chat:2026-04-23T12:00:00Z",
+                fact_key="home-brew-method",
+                replacement_intent=True,
+            )
+
+            self.assertTrue(result.superseded_source_paths)
+            page_text = (wiki_root / "coffee-preferences.md").read_text(encoding="utf-8")
+            self.assertNotIn("## Open Questions", page_text)
+            review_text = (wiki_root / "review.md").read_text(encoding="utf-8")
+            self.assertIn("resolved | contradiction | home-brew-method", review_text)
+            self.assertNotIn("open | contradiction | home-brew-method", review_text)
+
+    def test_bootstrap_integration_reuses_pipeline_with_bootstrap_budget(self) -> None:
+        with isolated_env() as (_, raw_root, wiki_root, _):
+            budgeted_path = raw_root / "nested" / "budgeted-note-123.md"
+            budgeted_path.parent.mkdir(parents=True)
+            budgeted_path.write_text(
+                vp.render_note(
+                    {
+                        "capture_id": "123",
+                        "source_kind": "capture",
+                        "source_id": "capture:123",
+                        "title": "Budgeted Note",
+                        "created_at": "2026-04-24T10:00:00Z",
+                        "source_file": "Budgeted Note.md",
+                    },
+                    "# Budgeted Note\n\nMarcus prefers a broader bootstrap budget for first-pass integration.",
+                ),
+                encoding="utf-8",
+            )
+
+            result = vp.bootstrap_integrate_sources()
+
+            self.assertEqual(result["processed_sources"], 1)
+            self.assertIn("budgeted-note", result["changed_slugs"])
+            page_text = (wiki_root / "budgeted-note.md").read_text(encoding="utf-8")
+            self.assertIn("Marcus prefers a broader bootstrap budget for first-pass integration.", page_text)
+            log_text = (wiki_root / "log.md").read_text(encoding="utf-8")
+            self.assertIn("bootstrap | pipeline", log_text)
+            self.assertIn('ingest | Capture: "Budgeted Note" | Router: heavy_update', log_text)
+
+    def test_light_update_defers_new_atomic_page_without_outbound_links(self) -> None:
+        with isolated_env() as (_, raw_root, wiki_root, _):
+            raw_path = raw_root / "isolated-note-123.md"
+            raw_path.write_text(
+                vp.render_raw_file(
+                    capture_id="123",
+                    title="Isolated Note",
+                    created_at="2026-04-24T10:00:00Z",
+                    source_file="Isolated Note.md",
+                    body="A standalone note with no related pages yet.",
+                ),
+                encoding="utf-8",
+            )
+
+            outcome = vp._upsert_wiki_pages_for_note(
+                frontmatter=vp.parse_raw_note(raw_path)[0],
+                title="Isolated Note",
+                body="A standalone note with no related pages yet.",
+                raw_path=raw_path,
+                budget=vp.MaintenanceBudget(max_candidate_pages=1, max_context_chars=10, max_pages_rewritten=4),
+            )
+
+            self.assertTrue(outcome.review_queued)
+            self.assertIn("Deferred page 'isolated-note' until it has a meaningful outbound link.", outcome.deferred_items)
+            self.assertFalse((wiki_root / "isolated-note.md").exists())
+            review_text = (wiki_root / "review.md").read_text(encoding="utf-8")
+            self.assertIn("light-update deferred work", review_text)
+
+    def test_lint_reports_invalid_shape_dead_citation_dead_link_orphan_and_open_question(self) -> None:
+        with isolated_env() as (_, _, wiki_root, _):
+            (wiki_root / "broken-topic.md").write_text(
+                "\n".join(
+                    [
+                        "# Broken Topic",
+                        "",
+                        "## Notes",
+                        "",
+                        "- Should not be here.",
+                        "",
+                        "## Connections",
+                        "",
+                        "- [[missing-page]]",
+                        "",
+                        "## Sources",
+                        "",
+                        "- [Missing](../raw/missing.md)",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (wiki_root / "isolated-note.md").write_text(
+                "\n".join(
+                    [
+                        "# Isolated Note",
+                        "",
+                        "## Notes",
+                        "",
+                        "- A standalone note.",
+                        "",
+                        "## Open Questions",
+                        "",
+                        "- Is this still current?",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            report = vp.lint_wiki(append_review=True)
+
+            findings = {(finding.kind, finding.slug) for finding in report.findings}
+            self.assertIn(("invalid-page-shape", "isolated-note"), findings)
+            self.assertIn(("dead-citation", "broken-topic"), findings)
+            self.assertIn(("dead-link", "broken-topic"), findings)
+            self.assertIn(("orphan", "broken-topic"), findings)
+            self.assertIn(("missing-outbound-link", "isolated-note"), findings)
+            self.assertIn(("contradiction-candidate", "isolated-note"), findings)
+            self.assertGreater(report.review_updates, 0)
+
+            review_text = (wiki_root / "review.md").read_text(encoding="utf-8")
+            self.assertIn("lint | dead-citation", review_text)
+            self.assertIn("lint | contradiction-candidate", review_text)
+
+    def test_lint_resolves_percent_encoded_source_paths(self) -> None:
+        with isolated_env() as (_, raw_root, wiki_root, _):
+            raw_path = raw_root / "Apple Notes" / "Programming Note.md"
+            raw_path.parent.mkdir(parents=True)
+            raw_path.write_text("# Programming Note\n", encoding="utf-8")
+            (wiki_root / "programming-note.md").write_text(
+                "\n".join(
+                    [
+                        "# Programming Note",
+                        "",
+                        "## Notes",
+                        "",
+                        "- A source-backed note.",
+                        "",
+                        "## Connections",
+                        "",
+                        "- [[programming]]",
+                        "",
+                        "## Sources",
+                        "",
+                        "- [Programming Note](../raw/Apple%20Notes/Programming%20Note.md)",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (wiki_root / "programming.md").write_text("# Programming\n\n## Connections\n\n- [[programming-note]]\n", encoding="utf-8")
+
+            report = vp.lint_wiki(append_review=False)
+
+            findings = {(finding.kind, finding.slug) for finding in report.findings}
+            self.assertNotIn(("dead-citation", "programming-note"), findings)
+
+    def test_trace_page_provenance_maps_note_to_persisted_source_artifact(self) -> None:
+        with isolated_env() as (_, _, wiki_root, _):
+            result = vp.query_writeback_chat_fact(
+                page_title="Coffee Preferences",
+                note="Marcus prefers pourover over espresso at home.",
+                related_pages=["coffee"],
+                created_at="2026-04-23T10:00:00Z",
+                conversation_ref="chat:2026-04-23T10:00:00Z",
+                fact_key="home-brew-method",
+            )
+
+            trace = vp.trace_page_provenance("coffee-preferences")
+
+            self.assertIn("Marcus prefers pourover over espresso at home.", trace)
+            assert result.source_path is not None
+            expected_source = "../" + result.source_path.relative_to(vp.ROOT).as_posix()
+            self.assertEqual(trace["Marcus prefers pourover over espresso at home."], [expected_source])
+            self.assertTrue((wiki_root / "coffee-preferences.md").exists())
+
+    def test_simple_ingest_acceptance_flow_updates_page_without_review(self) -> None:
+        with isolated_env() as (_, raw_root, wiki_root, _):
+            (wiki_root / "coffee.md").write_text(
+                "\n".join(
+                    [
+                        "# Coffee",
+                        "",
+                        "## Notes",
+                        "",
+                        "- Coffee is a durable interest.",
+                        "",
+                        "## Connections",
+                        "",
+                        "- [[brewing]]",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (wiki_root / "brewing.md").write_text(
+                "\n".join(
+                    [
+                        "# Brewing",
+                        "",
+                        "## Connections",
+                        "",
+                        "- [[coffee]]",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            raw_path = raw_root / "coffee-123.md"
+            raw_path.write_text(
+                vp.render_note(
+                    {
+                        "capture_id": "123",
+                        "source_kind": "capture",
+                        "source_id": "capture:123",
+                        "title": "Coffee",
+                        "created_at": "2026-04-24T10:00:00Z",
+                        "source_file": "Coffee.md",
+                    },
+                    "# Coffee\n\nCoffee tastes better when the grinder is dialed in.",
+                ),
+                encoding="utf-8",
+            )
+
+            outcome = vp._upsert_wiki_pages_for_note(
+                frontmatter=vp.parse_raw_note(raw_path)[0],
+                title="Coffee",
+                body="Coffee tastes better when the grinder is dialed in.",
+                raw_path=raw_path,
+            )
+
+            self.assertEqual(outcome.router_decision.action, "light_update")
+            self.assertFalse(outcome.review_queued)
+            page_text = (wiki_root / "coffee.md").read_text(encoding="utf-8")
+            self.assertIn("Coffee tastes better when the grinder is dialed in.", page_text)
+            self.assertIn("../raw/coffee-123.md", page_text)
+            self.assertFalse((wiki_root / "review.md").exists())
 
     def test_capture_ingest_injects_exports_and_marks_processed(self) -> None:
         with isolated_env() as (_, raw_root, _, capture_root):
@@ -683,12 +976,32 @@ class VaultPipelineTests(unittest.TestCase):
 
             self.assertEqual(result["integrated"], [{"capture_id": "123", "raw_path": "raw/note-123.md"}])
             frontmatter, _ = vp.parse_raw_note(raw_path)
-            self.assertRegex(str(frontmatter["integrated_at"]), r"^\d{4}-\d{2}-\d{2}T")
-            self.assertTrue((wiki_root / "note-1.md").exists())
-            self.assertIn("[[note-1]]", (wiki_root / "index.md").read_text(encoding="utf-8"))
-            self.assertIn('ingest | Capture: "Note 1"', (wiki_root / "log.md").read_text(encoding="utf-8"))
+            self.assertNotIn("integrated_at", frontmatter)
+            self.assertFalse((wiki_root / "note-1.md").exists())
+            self.assertIn('ingest | Capture: "Note 1" | Router: heavy_update | Deferred: 1', (wiki_root / "log.md").read_text(encoding="utf-8"))
+            self.assertIn("light-update deferred work", (wiki_root / "review.md").read_text(encoding="utf-8"))
             event = json.loads(vp.JSONL_LOG_PATH.read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual(event["event"], "integrated")
+
+    def test_ingest_raw_notes_skips_when_latest_event_is_integrated(self) -> None:
+        with isolated_env() as (_, raw_root, _, _):
+            raw_path = raw_root / "note-123.md"
+            raw_path.write_text(
+                vp.render_raw_file(
+                    capture_id="123",
+                    title="Note 1",
+                    created_at="2026-04-20T17:32:00Z",
+                    source_file="Note 1.md",
+                    body="This note has enough detail to stay in the page body.",
+                ),
+                encoding="utf-8",
+            )
+            vp.append_jsonl_event({"event": "integrated", "capture_id": "123", "raw_path": "raw/note-123.md"})
+
+            result = vp.ingest_raw_notes([{"capture_id": "123", "raw_path": "raw/note-123.md"}])
+
+            self.assertEqual(result["integrated"], [])
+            self.assertEqual(result["skipped"], [{"capture_id": "123", "raw_path": "raw/note-123.md"}])
 
     def test_ingest_reuses_single_raw_source_across_grounded_split_children(self) -> None:
         with isolated_env() as (_, raw_root, wiki_root, _):
@@ -737,6 +1050,49 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertIn("(../raw/ics33-week1.md)", iterators_page)
             self.assertIn("(../raw/ics33-week1.md)", generators_page)
 
+    def test_ingest_rejects_single_source_split_with_identical_child_notes(self) -> None:
+        with isolated_env() as (_, raw_root, wiki_root, _):
+            raw_path = raw_root / "recipe-list.md"
+            raw_path.write_text(
+                vp.render_raw_file(
+                    capture_id="123",
+                    title="Recipe List",
+                    created_at="2026-04-20T17:32:00Z",
+                    source_file="Recipe List.md",
+                    body="Soba noodles are served chilled. Ponzu sauce adds citrus and soy.",
+                ),
+                encoding="utf-8",
+            )
+
+            decision = vp.bw.PageSplitDecision(
+                is_atomic=False,
+                candidate_satellite_slugs=["soba-noodles", "ponzu-sauce"],
+                candidate_evaluations=[
+                    vp.bw.SplitCandidateEvaluation(
+                        slug="soba-noodles",
+                        accepted=True,
+                        grounding=["Recipe List"],
+                        passes_direct_link_test=True,
+                        passes_stable_page_test=True,
+                    ),
+                    vp.bw.SplitCandidateEvaluation(
+                        slug="ponzu-sauce",
+                        accepted=True,
+                        grounding=["Recipe List"],
+                        passes_direct_link_test=True,
+                        passes_stable_page_test=True,
+                    ),
+                ],
+            )
+
+            with mock.patch.object(vp, "_resolve_synthesis_config", return_value=("token", "gemini-test")):
+                with mock.patch.object(vp.bw, "analyze_page_for_atomic_split", return_value=decision):
+                    result = vp.ingest_raw_notes([{"capture_id": "123", "raw_path": "raw/recipe-list.md"}])
+
+            self.assertEqual(result["integrated"], [{"capture_id": "123", "raw_path": "raw/recipe-list.md"}])
+            self.assertFalse((wiki_root / "soba-noodles.md").exists())
+            self.assertFalse((wiki_root / "ponzu-sauce.md").exists())
+
     def test_ingest_fetches_remote_summary_for_url_note_and_renders_literal_url_source(self) -> None:
         with isolated_env() as (_, raw_root, wiki_root, _):
             raw_path = raw_root / "chocolate-cake-123.md"
@@ -760,10 +1116,10 @@ class VaultPipelineTests(unittest.TestCase):
 
             self.assertEqual(result["integrated"], [{"capture_id": "123", "raw_path": "raw/chocolate-cake-123.md"}])
             fetch_mock.assert_called_once_with("https://example.com/cake")
-            page_text = (wiki_root / "chocolate-cake.md").read_text(encoding="utf-8")
-            self.assertIn("Chocolate Cake Recipe — Rich and easy.", page_text)
-            self.assertIn("my short note", page_text)
-            self.assertIn("- [https://example.com/cake](../raw/chocolate-cake-123.md)", page_text)
+            self.assertFalse((wiki_root / "chocolate-cake.md").exists())
+            review_text = (wiki_root / "review.md").read_text(encoding="utf-8")
+            self.assertIn("light-update deferred work", review_text)
+            self.assertIn("[../raw/chocolate-cake-123.md]", review_text)
 
     def test_ingest_skips_google_search_fetch_but_preserves_literal_url_source(self) -> None:
         with isolated_env() as (_, raw_root, wiki_root, _):
@@ -784,9 +1140,10 @@ class VaultPipelineTests(unittest.TestCase):
 
             self.assertEqual(result["integrated"], [{"capture_id": "123", "raw_path": "raw/search-123.md"}])
             fetch_mock.assert_not_called()
-            page_text = (wiki_root / "cake-search.md").read_text(encoding="utf-8")
-            self.assertIn("look at later", page_text)
-            self.assertIn("- [https://www.google.com/search?q=chocolate+cake](../raw/search-123.md)", page_text)
+            self.assertFalse((wiki_root / "cake-search.md").exists())
+            review_text = (wiki_root / "review.md").read_text(encoding="utf-8")
+            self.assertIn("light-update deferred work", review_text)
+            self.assertIn("[../raw/search-123.md]", review_text)
 
     def test_page_resynthesis_on_touch_rewrites_existing_page_with_shared_atomic_shape(self) -> None:
         with isolated_env() as (_, raw_root, wiki_root, _):
@@ -887,7 +1244,7 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertNotIn("This page collects Marcus's notes", page_text)
             self.assertNotIn("- No notes yet.", page_text)
 
-    def test_page_resynthesis_on_touch_preserves_connections_and_updates_index_log_and_integrated_at(self) -> None:
+    def test_page_resynthesis_on_touch_preserves_connections_and_updates_index_log_without_mutating_raw(self) -> None:
         with isolated_env() as (_, raw_root, wiki_root, _):
             existing_page = wiki_root / "topic-a.md"
             existing_page.write_text(
@@ -935,7 +1292,7 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertIn("[[topic-a]]", (wiki_root / "index.md").read_text(encoding="utf-8"))
             self.assertIn('ingest | Capture: "Topic A"', (wiki_root / "log.md").read_text(encoding="utf-8"))
             frontmatter, _ = vp.parse_raw_note(raw_path)
-            self.assertIn("integrated_at", frontmatter)
+            self.assertNotIn("integrated_at", frontmatter)
 
     def test_ingest_realizes_split_by_converting_clean_parent_to_topic(self) -> None:
         with isolated_env() as (_, raw_root, wiki_root, _):
@@ -1107,15 +1464,14 @@ class VaultPipelineTests(unittest.TestCase):
             raw_path = raw_root / Path(result["capture_ingest"]["new_exports"][0]["raw_path"]).name
             raw_frontmatter, raw_body = vp.parse_raw_note(raw_path)
             self.assertEqual(raw_frontmatter["title"], "i like eating grapes")
-            self.assertIn("integrated_at", raw_frontmatter)
+            self.assertNotIn("integrated_at", raw_frontmatter)
             self.assertEqual(raw_body, "# i like eating grapes\n\n\n \t\n")
 
             wiki_page = wiki_root / "i-like-eating-grapes.md"
-            self.assertTrue(wiki_page.exists())
-            page_text = wiki_page.read_text(encoding="utf-8")
-            self.assertIn("[i like eating grapes](../raw/", page_text)
-            self.assertNotIn("This page collects Marcus's notes", page_text)
-            self.assertNotIn("- No notes yet.", page_text)
+            self.assertFalse(wiki_page.exists())
+            review_text = (wiki_root / "review.md").read_text(encoding="utf-8")
+            self.assertIn("light-update deferred work", review_text)
+            self.assertIn("[../raw/i-like-eating-grapes-", review_text)
 
             events = [json.loads(line) for line in vp.JSONL_LOG_PATH.read_text(encoding="utf-8").splitlines()]
             self.assertEqual(
@@ -1250,9 +1606,9 @@ class VaultPipelineTests(unittest.TestCase):
                 vp.ingest_raw_notes([{"capture_id": "123", "raw_path": "raw/note-123.md"}])
 
             written_paths = {Path(call.args[0]).name for call in atomic_write_mock.call_args_list}
-            self.assertIn("note-1.md", written_paths)
             self.assertIn("index.md", written_paths)
             self.assertIn("log.md", written_paths)
+            self.assertIn("review.md", written_paths)
 
 
 if __name__ == "__main__":

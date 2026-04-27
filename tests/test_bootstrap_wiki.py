@@ -529,6 +529,35 @@ class BootstrapWikiTests(unittest.TestCase):
         assert parsed is not None
         self.assertEqual(parsed.detected_url, "https://example.com/cake")
 
+    def test_parse_source_line_handles_parentheses_in_target(self) -> None:
+        parsed = bw.parse_source_line("- [Chanko Nabe](../raw/Food/Chanko Nabe (Sumo Stew).md)")
+
+        assert parsed is not None
+        self.assertEqual(parsed.path, "../raw/Food/Chanko Nabe (Sumo Stew).md")
+
+    def test_render_source_lines_wraps_unsafe_target_in_angle_brackets(self) -> None:
+        source = bw.SourceRecord(
+            label="Chanko Nabe",
+            path="../raw/Food/Chanko Nabe (Sumo Stew).md",
+            status="local_only",
+            raw_content="",
+            cleaned_text="Recipe.",
+            fetched_summary=None,
+            detected_url=None,
+        )
+        page = bw.Page(
+            slug="chanko-nabe",
+            title="Chanko Nabe",
+            page_type="Resources",
+            summary_hint="Chanko Nabe",
+            sources={source.path: source},
+        )
+
+        self.assertEqual(
+            bw.render_source_lines(page),
+            ["- [Chanko Nabe](<../raw/Food/Chanko Nabe (Sumo Stew).md>)"],
+        )
+
     def test_atomic_page_with_only_notes_and_link_omits_sources(self) -> None:
         page = bw.Page(
             slug="example",
@@ -770,6 +799,8 @@ class BootstrapWikiTests(unittest.TestCase):
 
         kwargs = generate_mock.call_args.kwargs
         self.assertIn("Do not require multiple source files.", kwargs["messages"][1]["content"])
+        self.assertIn("grounding must be usable as that child page's ## Notes", kwargs["messages"][1]["content"])
+        self.assertIn("Same-source sibling children are allowed only when", kwargs["messages"][1]["content"])
         self.assertIn("candidate_evaluations", kwargs["response_schema"]["required"])
         self.assertFalse(decision.is_atomic)
         self.assertEqual(decision.candidate_satellite_slugs, ["iterators", "generators"])
@@ -822,6 +853,112 @@ class BootstrapWikiTests(unittest.TestCase):
         self.assertTrue(applied)
         self.assertIn(source.path, pages["iterators"].sources)
         self.assertIn(source.path, pages["generators"].sources)
+        self.assertNotIn(source.cleaned_text, pages["iterators"].notes)
+        self.assertNotIn(source.cleaned_text, pages["generators"].notes)
+
+    def test_apply_split_decision_rejects_same_source_cloned_child_notes(self) -> None:
+        source = bw.SourceRecord(
+            label="Soba Noodles With Ponzu Sauce",
+            path="../raw/soba-ponzu.md",
+            status="local_only",
+            raw_content="",
+            cleaned_text="Soba noodles are served chilled. Ponzu sauce adds citrus and soy.",
+            fetched_summary=None,
+            detected_url=None,
+        )
+        pages = {
+            "recipe": bw.Page(
+                slug="recipe",
+                title="Recipe",
+                page_type="Concepts",
+                summary_hint="Recipe",
+                sources={source.path: source},
+            )
+        }
+        decision = bw.PageSplitDecision(
+            is_atomic=False,
+            candidate_satellite_slugs=["soba-noodles", "ponzu-sauce"],
+            candidate_evaluations=[
+                bw.SplitCandidateEvaluation(
+                    slug="soba-noodles",
+                    accepted=True,
+                    grounding=["Soba Noodles With Ponzu Sauce"],
+                    passes_direct_link_test=True,
+                    passes_stable_page_test=True,
+                ),
+                bw.SplitCandidateEvaluation(
+                    slug="ponzu-sauce",
+                    accepted=True,
+                    grounding=["Soba Noodles With Ponzu Sauce"],
+                    passes_direct_link_test=True,
+                    passes_stable_page_test=True,
+                ),
+            ],
+        )
+
+        applied = bw.apply_split_decision(pages, "recipe", decision, seed_kind="ingest", allow_partial_source_coverage=True)
+
+        self.assertFalse(applied)
+        self.assertNotIn("soba-noodles", pages)
+        self.assertNotIn("ponzu-sauce", pages)
+
+    def test_validate_split_child_grounding_rejects_source_label_or_parent_note_only(self) -> None:
+        source = bw.SourceRecord(
+            label="Soba Noodles With Ponzu Sauce",
+            path="../raw/soba-ponzu.md",
+            status="local_only",
+            raw_content="",
+            cleaned_text="Soba noodles are served chilled. Ponzu sauce adds citrus and soy.",
+            fetched_summary=None,
+            detected_url=None,
+        )
+        parent = bw.Page(
+            slug="recipe",
+            title="Recipe",
+            page_type="Concepts",
+            summary_hint="Recipe",
+            notes=["Ponzu sauce adds citrus and soy."],
+            sources={source.path: source},
+        )
+        decision = bw.PageSplitDecision(
+            is_atomic=False,
+            candidate_satellite_slugs=["soba-noodles", "ponzu-sauce", "dipping-sauce"],
+            candidate_evaluations=[
+                bw.SplitCandidateEvaluation(
+                    slug="soba-noodles",
+                    accepted=True,
+                    grounding=["Soba noodles are served chilled."],
+                    passes_direct_link_test=True,
+                    passes_stable_page_test=True,
+                ),
+                bw.SplitCandidateEvaluation(
+                    slug="ponzu-sauce",
+                    accepted=True,
+                    grounding=["Soba Noodles With Ponzu Sauce"],
+                    passes_direct_link_test=True,
+                    passes_stable_page_test=True,
+                ),
+                bw.SplitCandidateEvaluation(
+                    slug="dipping-sauce",
+                    accepted=True,
+                    grounding=["Ponzu sauce adds citrus and soy."],
+                    passes_direct_link_test=True,
+                    passes_stable_page_test=True,
+                ),
+            ],
+        )
+        source_groups = {
+            "soba-noodles": [source],
+            "ponzu-sauce": [source],
+            "dipping-sauce": [source],
+        }
+
+        validated = bw.validate_split_child_grounding(parent, decision, source_groups)
+
+        self.assertTrue(validated.is_atomic)
+        self.assertIn("source-label-only child grounding", validated.rejection_reasons)
+        self.assertIn("parent-note-identical child grounding", validated.rejection_reasons)
+        self.assertIn("child grounding collapsed below split threshold", validated.rejection_reasons)
 
     def test_apply_split_decision_skips_incidental_single_source_reuse(self) -> None:
         source = bw.SourceRecord(
@@ -1020,6 +1157,8 @@ class BootstrapWikiTests(unittest.TestCase):
                 self.assertIn("lazy-sequences -> iterators, generators", log_text)
                 self.assertIn("[[iterators]]", catalog_text)
                 self.assertIn("[[generators]]", catalog_text)
+                self.assertNotIn(source.cleaned_text, (wiki_root / "iterators.md").read_text(encoding="utf-8"))
+                self.assertNotIn(source.cleaned_text, (wiki_root / "generators.md").read_text(encoding="utf-8"))
 
     def test_maybe_apply_query_time_split_fix_rejects_unstable_decisions(self) -> None:
         source = bw.SourceRecord(
@@ -1154,6 +1293,63 @@ class BootstrapWikiTests(unittest.TestCase):
                 self.assertEqual(write_mock.call_args_list, [])
                 self.assertEqual(log_after_first, (wiki_root / "log.md").read_text(encoding="utf-8"))
                 self.assertEqual(log_after_first.count("query | split-adjacent query writeback"), 1)
+
+    def test_maybe_apply_query_time_split_fix_rejects_cloned_child_notes(self) -> None:
+        source = bw.SourceRecord(
+            label="Soba Noodles With Ponzu Sauce",
+            path="../raw/soba-ponzu.md",
+            status="local_only",
+            raw_content="",
+            cleaned_text="Soba noodles are served chilled. Ponzu sauce adds citrus and soy.",
+            fetched_summary=None,
+            detected_url=None,
+        )
+        page = bw.Page(
+            slug="recipe",
+            title="Recipe",
+            page_type="Resources",
+            summary_hint="Recipe",
+            sources={source.path: source},
+        )
+        decision = bw.PageSplitDecision(
+            is_atomic=False,
+            candidate_satellite_slugs=["soba-noodles", "ponzu-sauce"],
+            candidate_evaluations=[
+                bw.SplitCandidateEvaluation(
+                    slug="soba-noodles",
+                    accepted=True,
+                    grounding=["Soba Noodles With Ponzu Sauce"],
+                    passes_direct_link_test=True,
+                    passes_stable_page_test=True,
+                ),
+                bw.SplitCandidateEvaluation(
+                    slug="ponzu-sauce",
+                    accepted=True,
+                    grounding=["Soba Noodles With Ponzu Sauce"],
+                    passes_direct_link_test=True,
+                    passes_stable_page_test=True,
+                ),
+            ],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            wiki_root = root / "wiki"
+            wiki_root.mkdir()
+
+            with bw.temporary_workspace(root):
+                bw.atomic_write_text(wiki_root / "recipe.md", bw.render_page(page))
+                bw.atomic_write_text(wiki_root / "index.md", bw.render_index({"recipe": page}))
+                bw.atomic_write_text(wiki_root / bw.CATALOG_PATH, bw.render_catalog({"recipe": page}))
+                bw.atomic_write_text(wiki_root / "log.md", "# Wiki Log\n")
+
+                with mock.patch.object(bw, "atomic_write_text", wraps=bw.atomic_write_text) as write_mock:
+                    applied = bw.maybe_apply_query_time_split_fix("recipe", split_decision=decision)
+
+                self.assertFalse(applied)
+                self.assertEqual(write_mock.call_args_list, [])
+                self.assertFalse((wiki_root / "soba-noodles.md").exists())
+                self.assertFalse((wiki_root / "ponzu-sauce.md").exists())
 
     def test_split_debug_output_includes_grounding_and_rejection_reasons(self) -> None:
         sources = [

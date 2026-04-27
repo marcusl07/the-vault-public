@@ -113,6 +113,42 @@ Code should remain authoritative for:
 - Add a review backlog file in `wiki/` as a first-class artifact.
 - Keep `wiki/log.md` as the chronological audit log, not the backlog queue.
 
+## Repo Workflow And Artifact Policy
+
+### Bootstrap
+
+- Bootstrap is a coverage-first initialization pass over existing `raw/` content.
+- Batch processing is acceptable during bootstrap; precision can improve in later maintenance passes.
+- Treat source paths as weak signals only. Do not reproduce input folder structure in the wiki.
+- If a source includes an external URL, preserve the literal URL in wiki citations when the page is integrated.
+
+### Navigation artifacts
+
+- `wiki/index.md` is the primary navigation surface and should stay compact enough to fit comfortably in model context.
+- `wiki/catalog.md`, when present, is the exhaustive lookup artifact and should be regenerated automatically rather than hand-maintained.
+- Query flow should use `wiki/index.md` first, then `wiki/catalog.md` if available, then direct wiki search as a last resort.
+- `wiki/log.md` is append-only historical trace.
+- `wiki/review.md` is the actionable backlog for contradictions and deferred work.
+
+### Logging shape
+
+- Keep log headings grep-friendly and stable, for example:
+  - `## [YYYY-MM-DD] ingest | Capture: "note title"`
+  - `## [YYYY-MM-DD] query | "question text"`
+  - `## [YYYY-MM-DD] lint | pass — 3 orphans found`
+  - `## [YYYY-MM-DD] bootstrap | completed — ...`
+
+### Private/public publishing workflow
+
+- This repository is the private canonical source of truth.
+- `raw/`, `sources/chat/`, and `wiki/` stay private here and must never be pushed to the public repo.
+- Public publication should happen from a filtered mirror, not from direct pushes of this repo.
+- Use `scripts/sync_public_mirror.py --dest <public-repo-root>` to copy publishable files into the public repository.
+- Use `scripts/publish_private_and_public.py --public-repo <public-repo-root>` when a task requires committing and pushing both repos in one pass.
+- Treat the public repo as disposable output regenerated from the private repo.
+- After changes in this repo, commit and push the private repo unless a higher-priority instruction or user request says otherwise.
+- After code-related changes, also sync, commit, and push the public repo unless a higher-priority instruction or user request says otherwise.
+
 ## Acceptance Criteria
 
 The design is good enough if:
