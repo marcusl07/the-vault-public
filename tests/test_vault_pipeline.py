@@ -460,6 +460,66 @@ class VaultPipelineTests(unittest.TestCase):
             review_text = (wiki_root / "review.md").read_text(encoding="utf-8")
             self.assertIn("light-update deferred work", review_text)
 
+    def test_ingest_does_not_clone_source_body_to_folder_topic_assignment(self) -> None:
+        with isolated_env() as (_, raw_root, wiki_root, _):
+            (wiki_root / "coffee-grinder.md").write_text(
+                "\n".join(
+                    [
+                        "# Coffee Grinder",
+                        "",
+                        "## Notes",
+                        "",
+                        "- Existing grinder note.",
+                        "",
+                        "## Connections",
+                        "",
+                        "- [[coffee]]",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (wiki_root / "coffee.md").write_text(
+                "\n".join(
+                    [
+                        "# Coffee",
+                        "",
+                        "## Connections",
+                        "",
+                        "- [[coffee-grinder]]",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            raw_path = raw_root / "coffee" / "coffee-grinder-123.md"
+            raw_path.parent.mkdir(parents=True)
+            raw_path.write_text(
+                vp.render_raw_file(
+                    capture_id="123",
+                    title="Coffee Grinder",
+                    created_at="2026-04-24T10:00:00Z",
+                    source_file="Coffee Grinder.md",
+                    body="Coffee tastes better when the grinder is dialed in.",
+                ),
+                encoding="utf-8",
+            )
+
+            outcome = vp._upsert_wiki_pages_for_note(
+                frontmatter=vp.parse_raw_note(raw_path)[0],
+                title="Coffee Grinder",
+                body="Coffee tastes better when the grinder is dialed in.",
+                raw_path=raw_path,
+            )
+
+            self.assertEqual(outcome.router_decision.action, "heavy_update")
+            owner_text = (wiki_root / "coffee-grinder.md").read_text(encoding="utf-8")
+            folder_text = (wiki_root / "coffee.md").read_text(encoding="utf-8")
+            self.assertIn("Coffee tastes better when the grinder is dialed in.", owner_text)
+            self.assertIn("../raw/coffee/coffee-grinder-123.md", owner_text)
+            self.assertNotIn("Coffee tastes better when the grinder is dialed in.", folder_text)
+            self.assertNotIn("../raw/coffee/coffee-grinder-123.md", folder_text)
+
     def test_lint_reports_invalid_shape_dead_citation_dead_link_orphan_and_open_question(self) -> None:
         with isolated_env() as (_, _, wiki_root, _):
             (wiki_root / "broken-topic.md").write_text(

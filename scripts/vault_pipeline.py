@@ -930,6 +930,10 @@ def _build_default_page_assignments(title: str, body: str, raw_abspath: Path) ->
     return wiki_impl._build_default_page_assignments(sys.modules[__name__], title, body, raw_abspath)
 
 
+def _content_owner_slug(assignments: list[tuple[str, str, str | None]]) -> str | None:
+    return wiki_impl._content_owner_slug(sys.modules[__name__], assignments)
+
+
 def _source_record_from_artifact(frontmatter: dict[str, object], title: str, body: str, source_path: Path) -> bw.SourceRecord:
     return wiki_impl._source_record_from_artifact(sys.modules[__name__], frontmatter, title, body, source_path)
 

@@ -67,6 +67,8 @@ def build_simple_notes_markdown(api: ModuleType, page: object) -> str:
         ]
         if synthesized_notes:
             return "\n".join(f"- {note}" for note in note_candidates[:60])
+        if note_candidates and normalized_excerpt:
+            return f"- {normalized_excerpt}"
 
         body_parts = []
         if source.fetched_summary:

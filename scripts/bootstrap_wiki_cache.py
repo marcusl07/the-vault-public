@@ -181,19 +181,32 @@ def apply_note_cache_entry_to_pages(
         seen.add(slug)
         unique_page_slugs.append((slug, seed_kind))
         api.ensure_supporting_pages(pages, slug, title, seed_kind)
+
+    owner_slug: str | None = None
+    for preferred_seed_kind in ("title", "model", "query"):
+        for slug, seed_kind in unique_page_slugs:
+            if seed_kind == preferred_seed_kind:
+                owner_slug = slug
+                break
+        if owner_slug is not None:
+            break
+    if owner_slug is None and unique_page_slugs:
+        owner_slug = unique_page_slugs[0][0]
+    if owner_slug is not None:
+        owner_seed_kind = next(seed_kind for slug, seed_kind in unique_page_slugs if slug == owner_slug)
         api.add_page_note(
             pages=pages,
-            slug=slug,
-            title=api.page_title(slug),
-            page_type=api.classify_page(slug, title, seed_kind),
+            slug=owner_slug,
+            title=api.page_title(owner_slug),
+            page_type=api.classify_page(owner_slug, title, owner_seed_kind),
             summary_hint=title,
             note_text=note_text,
             source_label=source_record.label,
             source_path=source_record.path,
             source_status=source_record.status,
-            seed_kind=seed_kind,
+            seed_kind=owner_seed_kind,
         )
-        pages[slug].sources[source_record.path] = source_record
+        pages[owner_slug].sources[source_record.path] = source_record
 
     slugs_only = [slug for slug, _seed_kind in unique_page_slugs]
     for slug in slugs_only:

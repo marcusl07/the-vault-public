@@ -438,7 +438,8 @@ def apply_split_decision(
             if note not in child_page.notes:
                 child_page.notes.append(note)
         for source in source_groups.get(child_slug, []):
-            add_source_to_page(api, child_page, source, seed_kind, append_excerpt=not bool(split_notes))
+            append_excerpt = not bool(split_notes) and len(source_groups) == 1
+            add_source_to_page(api, child_page, source, seed_kind, append_excerpt=append_excerpt)
         connect_pages(pages, parent_slug, child_slug)
 
     return True

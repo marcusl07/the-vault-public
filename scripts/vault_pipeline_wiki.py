@@ -97,6 +97,16 @@ def _build_default_page_assignments(api: ModuleType, title: str, body: str, raw_
     return assignments
 
 
+def _content_owner_slug(api: ModuleType, assignments: list[tuple[str, str, str | None]]) -> str | None:
+    if not assignments:
+        return None
+    for preferred_seed_kind in ("title", "model", "query"):
+        for slug, seed_kind, _parent_slug in assignments:
+            if seed_kind == preferred_seed_kind:
+                return slug
+    return assignments[0][0]
+
+
 def _source_record_from_artifact(
     api: ModuleType,
     frontmatter: dict[str, object],
@@ -478,12 +488,14 @@ def _upsert_wiki_pages_for_note(
             deferred_items=proposal.deferred_items,
         )
 
+    content_owner_slug = api._content_owner_slug(resolved_assignments)
     for slug, seed_kind, parent_slug in resolved_assignments:
         page = load_page(slug, seed_kind)
         page.shape = api.bw.PAGE_SHAPE_ATOMIC
         page.page_type = api.bw.classify_page(slug, title, seed_kind)
         page.seed_kinds.add(seed_kind)
-        api.bw.add_source_to_page(page, source_record, seed_kind)
+        if slug == content_owner_slug:
+            api.bw.add_source_to_page(page, source_record, seed_kind)
         if parent_slug:
             parent_page = load_page(parent_slug, seed_kind)
             parent_page.shape = api.bw.PAGE_SHAPE_TOPIC

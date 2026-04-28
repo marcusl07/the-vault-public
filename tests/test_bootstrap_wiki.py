@@ -470,6 +470,61 @@ class BootstrapWikiTests(unittest.TestCase):
         self.assertIn("- Rug making", notes)
         self.assertIn("- Asian bakery", notes)
 
+    def test_single_source_page_with_auto_excerpt_does_not_expand_to_full_source_body(self) -> None:
+        full_body = " ".join(f"detail-{index}" for index in range(80))
+        source = bw.SourceRecord(
+            label="Long Source",
+            path="../raw/long-source.md",
+            status="local_only",
+            raw_content="",
+            cleaned_text=full_body,
+            fetched_summary=None,
+            detected_url=None,
+        )
+        page = bw.Page(
+            slug="long-source",
+            title="Long Source",
+            page_type="Concepts",
+            summary_hint="Long Source",
+            sources={source.path: source},
+        )
+        page.connections["related-page"] += 1
+        page.notes.append(bw.compact_source_text(source, limit=220).strip())
+
+        rendered = bw.render_page(page)
+
+        self.assertIn("## Notes", rendered)
+        self.assertIn("detail-0", rendered)
+        self.assertNotIn("detail-79", rendered)
+        self.assertIn("## Sources", rendered)
+
+    def test_cached_bootstrap_note_uses_single_content_owner_for_source_body(self) -> None:
+        source = bw.prepare_source_record(
+            source_label="Coffee Grinder",
+            source_path="../raw/coffee/Coffee Grinder.md",
+            source_status="local_only",
+            raw_content="Coffee tastes better when the grinder is dialed in.",
+            fetched_summary=None,
+            detected_url=None,
+        )
+        cache_entry = bw.build_note_cache_entry(
+            fingerprint="abc",
+            title="Coffee Grinder",
+            source_record=source,
+            note_text="Coffee tastes better when the grinder is dialed in.",
+            page_assignments=[("coffee-grinder", "title"), ("coffee", "folder")],
+            skipped=False,
+        )
+        pages: dict[str, bw.Page] = {}
+
+        bw.apply_note_cache_entry_to_pages(pages=pages, cache_entry=cache_entry)
+
+        self.assertIn(source.path, pages["coffee-grinder"].sources)
+        self.assertIn("Coffee tastes better when the grinder is dialed in.", pages["coffee-grinder"].notes)
+        self.assertNotIn(source.path, pages["coffee"].sources)
+        self.assertNotIn("Coffee tastes better when the grinder is dialed in.", pages["coffee"].notes)
+        self.assertIn("coffee", pages["coffee-grinder"].connections)
+
     def test_atomic_page_renderer_omits_boilerplate_and_keeps_real_sections(self) -> None:
         source = bw.SourceRecord(
             label="Example Source",
