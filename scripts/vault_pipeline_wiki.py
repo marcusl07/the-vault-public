@@ -83,7 +83,7 @@ def _build_default_page_assignments(api: ModuleType, title: str, body: str, raw_
     if api.bw.should_fold_note_into_parent(title, body, url) and path_topics:
         return [(path_topics[0], "folder")]
 
-    if title_slug and title_slug not in {"new-note", "untitled"}:
+    if title_slug and title_slug != "new-note" and not api.is_placeholder_title(title):
         assignments.append((title_slug, "title"))
         seen.add(title_slug)
 
@@ -223,7 +223,7 @@ def _route_source_update(
             action = "light_update"
             confidence = "high"
             reason = "Single existing atomic page can absorb a bounded update."
-    elif not body.strip() and api.bw.slugify(title) in {"", "untitled", "new-note"}:
+    elif not body.strip() and (api.bw.slugify(title) in {"", "new-note"} or api.is_placeholder_title(title)):
         action = "ignore"
         confidence = "medium"
         reason = "Source has no durable title or body signal after normalization."

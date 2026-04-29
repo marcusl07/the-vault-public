@@ -65,7 +65,10 @@ class VaultPipelineTests(unittest.TestCase):
         self.assertEqual(vp.clean_title_from_filename("✓ My note.md"), "My note")
         self.assertTrue(vp.is_placeholder_title("Untitled"))
         self.assertTrue(vp.is_placeholder_title(" untitled "))
+        self.assertTrue(vp.is_placeholder_title("Untitled 1"))
+        self.assertTrue(vp.is_placeholder_title("untitled 25"))
         self.assertFalse(vp.is_placeholder_title("New Note"))
+        self.assertFalse(vp.is_placeholder_title("Untitled note"))
         self.assertEqual(vp.raw_file_slug("A/B\\C:*?<>|"), "a-b-c")
         self.assertEqual(vp.raw_file_slug("---"), "untitled")
         self.assertRegex(vp.utc_timestamp(), r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
@@ -731,6 +734,19 @@ class VaultPipelineTests(unittest.TestCase):
             payload = json.loads(vp.JSONL_LOG_PATH.read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual(payload["event"], "empty_deleted")
             self.assertEqual(payload["filename"], "Untitled.md")
+
+    def test_numbered_placeholder_empty_note_is_deleted(self) -> None:
+        with isolated_env() as (_, _, _, capture_root):
+            note_path = capture_root / "Untitled 2.md"
+            write_note(note_path, " \n\t")
+
+            result = vp.capture_ingest(capture_root=capture_root)
+
+            self.assertEqual(result["new_exports"], [])
+            self.assertFalse(note_path.exists())
+            payload = json.loads(vp.JSONL_LOG_PATH.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(payload["event"], "empty_deleted")
+            self.assertEqual(payload["filename"], "Untitled 2.md")
 
     def test_blank_body_with_meaningful_title_is_exported(self) -> None:
         with isolated_env() as (_, raw_root, _, capture_root):

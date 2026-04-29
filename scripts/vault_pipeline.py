@@ -257,7 +257,7 @@ def clean_title_from_filename(filename: str) -> str:
 
 
 def is_placeholder_title(title: str) -> bool:
-    return title.strip().lower() == "untitled"
+    return re.fullmatch(r"untitled(?:\s+\d+)?", title.strip(), flags=re.I) is not None
 
 
 def raw_file_slug(title: str) -> str:
