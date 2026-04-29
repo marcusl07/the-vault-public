@@ -578,6 +578,7 @@ class VaultPipelineTests(unittest.TestCase):
             review_text = (wiki_root / "review.md").read_text(encoding="utf-8")
             self.assertIn("lint | dead-citation", review_text)
             self.assertIn("lint | contradiction-candidate", review_text)
+            self.assertNotIn("lint | orphan", review_text)
 
     def test_lint_resolves_percent_encoded_source_paths(self) -> None:
         with isolated_env() as (_, raw_root, wiki_root, _):

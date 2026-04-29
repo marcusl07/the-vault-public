@@ -7,6 +7,15 @@ if TYPE_CHECKING:
     from types import ModuleType
 
 
+REVIEW_QUEUE_FINDING_KINDS = {
+    "invalid-page-shape",
+    "missing-outbound-link",
+    "dead-citation",
+    "dead-link",
+    "contradiction-candidate",
+}
+
+
 def trace_page_provenance(api: ModuleType, slug: str) -> dict[str, list[str]]:
     page_path = api.WIKI_ROOT / f"{slug}.md"
     if not page_path.exists():
@@ -84,6 +93,8 @@ def lint_wiki(api: ModuleType, *, append_review: bool = False) -> object:
     if append_review:
         seen_review_keys: set[tuple[str, str, str]] = set()
         for finding in findings:
+            if finding.kind not in REVIEW_QUEUE_FINDING_KINDS:
+                continue
             review_key = (finding.kind, finding.slug, finding.detail)
             if review_key in seen_review_keys:
                 continue
