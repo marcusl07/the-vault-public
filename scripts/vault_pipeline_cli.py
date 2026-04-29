@@ -151,6 +151,23 @@ def run_vault_pipeline(
         return {"capture_ingest": capture_result, "wiki_ingest": wiki_ingest}
 
 
+def pipeline_run_has_output(result: object) -> bool:
+    if not isinstance(result, dict):
+        return True
+
+    capture_result = result.get("capture_ingest")
+    if isinstance(capture_result, dict):
+        if capture_result.get("new_exports") or capture_result.get("errors"):
+            return True
+
+    wiki_result = result.get("wiki_ingest")
+    if isinstance(wiki_result, dict):
+        if wiki_result.get("integrated") or wiki_result.get("skipped") or wiki_result.get("failed"):
+            return True
+
+    return False
+
+
 def build_capture_parser(api: ModuleType) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Export Obsidian capture notes into raw markdown files.")
     parser.add_argument("--debug", action="store_true", help="Emit human-readable debug output to stderr.")
@@ -248,5 +265,6 @@ def run_main(api: ModuleType, argv: list[str] | None = None) -> int:
         retry_failed=args.retry_failed,
         page_resynthesis_on_touch=args.page_resynthesis_on_touch,
     )
-    print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    if api.pipeline_run_has_output(result):
+        print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
     return 0

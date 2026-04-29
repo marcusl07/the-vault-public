@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
@@ -1570,6 +1570,43 @@ class VaultPipelineTests(unittest.TestCase):
             with mock.patch.object(vp, "pipeline_lock", side_effect=RuntimeError("pipeline lock is already held")):
                 with self.assertRaises(RuntimeError):
                     vp.run_vault_pipeline(capture_root=capture_root)
+
+    def test_run_main_suppresses_empty_pipeline_result(self) -> None:
+        empty_result = {
+            "capture_ingest": {"new_exports": [], "errors": []},
+            "wiki_ingest": {"integrated": [], "skipped": [], "failed": []},
+        }
+
+        with isolated_env() as (_, _, _, capture_root):
+            stdout = io.StringIO()
+            with mock.patch.object(vp, "run_vault_pipeline", return_value=empty_result):
+                with redirect_stdout(stdout):
+                    result = vp.run_main(["--capture-root", str(capture_root)])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(stdout.getvalue(), "")
+
+    def test_run_main_prints_nonempty_pipeline_result(self) -> None:
+        nonempty_result = {
+            "capture_ingest": {
+                "new_exports": [{"capture_id": "123", "raw_path": "raw/note-123.md"}],
+                "errors": [],
+            },
+            "wiki_ingest": {
+                "integrated": [{"capture_id": "123", "raw_path": "raw/note-123.md"}],
+                "skipped": [],
+                "failed": [],
+            },
+        }
+
+        with isolated_env() as (_, _, _, capture_root):
+            stdout = io.StringIO()
+            with mock.patch.object(vp, "run_vault_pipeline", return_value=nonempty_result):
+                with redirect_stdout(stdout):
+                    result = vp.run_main(["--capture-root", str(capture_root)])
+
+        self.assertEqual(result, 0)
+        self.assertEqual(json.loads(stdout.getvalue()), nonempty_result)
 
     def test_append_jsonl_event_flushes_and_fsyncs(self) -> None:
         with isolated_env() as (root, _, _, _):

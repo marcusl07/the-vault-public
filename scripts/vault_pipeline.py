@@ -1180,6 +1180,10 @@ def run_vault_pipeline(
     )
 
 
+def pipeline_run_has_output(result: object) -> bool:
+    return cli_impl.pipeline_run_has_output(result)
+
+
 def build_capture_parser() -> argparse.ArgumentParser:
     return cli_impl.build_capture_parser(sys.modules[__name__])
 
