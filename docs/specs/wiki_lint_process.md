@@ -13,6 +13,7 @@ Codex owns routine wiki hygiene. Marcus remains curator for semantic decisions.
 - Mechanical findings and open-question/contradiction candidates are queued in `wiki/review.md` by default.
 - Graph and synthesis findings stay in chat unless Marcus explicitly asks to queue them.
 - Orphans are valid Zettelkasten notes. Treat them as review candidates, not failures.
+- Before re-raising Level 2 or Level 3 candidates, check `wiki/review.md` for `accepted | lint | ...` entries that record curator-approved exceptions.
 - Do not auto-merge, delete, rewrite, or otherwise fix semantic findings without explicit approval.
 
 ## Level 1: Mechanical Integrity
@@ -60,6 +61,8 @@ These are ranked review candidates, not failures. Do not append them to `wiki/re
 
 Topic page candidates should be specific and supported by at least three atomic notes that compress cleanly into the label. Generic buckets should stay out of the wiki.
 
+If Marcus accepts a graph-hygiene exception, record it as an `accepted | lint | ...` entry in `wiki/review.md` and do not keep reporting it in future lint summaries unless new evidence changes the judgment.
+
 ## Level 3: Synthesis Review
 
 Make a bounded judgment pass for synthesis quality.
@@ -80,6 +83,8 @@ Treat source-shaped pages as soft candidates only when multiple signals combine:
 - low reuse
 
 Never auto-merge, delete, or rewrite these findings without explicit approval. Present the options and recommendation in chat.
+
+If Marcus accepts a synthesis exception, record it as an `accepted | lint | ...` entry in `wiki/review.md` and treat it as settled unless the page materially changes.
 
 ## Reporting
 
