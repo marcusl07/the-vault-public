@@ -410,7 +410,7 @@ def latest_state_record(item_id: str, state_path: Path | None = None) -> dict[st
         payload = json.loads(line)
         if payload.get("item_id") != item_id:
             continue
-        if payload.get("event") in {"processed", "skipped", "updated"}:
+        if payload.get("event") in {"processed", "skipped", "updated", "failed"}:
             latest = payload
     return latest
 

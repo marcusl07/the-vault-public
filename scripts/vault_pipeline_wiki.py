@@ -697,14 +697,24 @@ def ingest_raw_notes(
             except Exception as exc:
                 last_error = exc
         if last_error is not None:
+            error_summary = str(last_error)
             api.append_jsonl_event(
                 {
                     "event": "integrate_failed",
                     "capture_id": item["capture_id"],
                     "raw_path": item["raw_path"],
-                    "error": str(last_error),
+                    "error": error_summary,
                 },
                 log_path=log_path,
+            )
+            api.append_state_event(
+                {
+                    "event": "failed",
+                    **state_payload,
+                    "stage": "wiki_ingest",
+                    "error_summary": error_summary,
+                },
+                state_path=state_path,
             )
             result["failed"].append(item)
             api.debug_print(f"Integration failed for {item['capture_id']}: {last_error}", enabled=debug, stream=debug_stream)

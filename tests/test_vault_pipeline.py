@@ -1192,6 +1192,48 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertEqual([event["event"] for event in events], ["discovered", "processed", "updated", "processed"])
             self.assertNotEqual(events[1]["content_hash"], events[2]["content_hash"])
 
+    def test_ingest_raw_notes_failed_item_retries_on_next_run(self) -> None:
+        with isolated_env() as (_, raw_root, _, _):
+            raw_path = raw_root / "note-123.md"
+            raw_path.write_text(
+                vp.render_raw_file(
+                    capture_id="123",
+                    title="Note 1",
+                    created_at="2026-04-20T17:32:00Z",
+                    source_file="Note 1.md",
+                    body="Stable body.",
+                ),
+                encoding="utf-8",
+            )
+            attempts: list[str] = []
+
+            def handler(capture_id: str, path: Path) -> None:
+                attempts.append(capture_id)
+                if len(attempts) <= 3:
+                    raise RuntimeError("temporary wiki failure")
+
+            first = vp.ingest_raw_notes(
+                [{"capture_id": "123", "raw_path": "raw/note-123.md"}],
+                integration_handler=handler,
+            )
+            second = vp.ingest_raw_notes(
+                [{"capture_id": "123", "raw_path": "raw/note-123.md"}],
+                integration_handler=handler,
+            )
+
+            self.assertEqual(first["failed"], [{"capture_id": "123", "raw_path": "raw/note-123.md"}])
+            self.assertEqual(first["integrated"], [])
+            self.assertEqual(second["integrated"], [{"capture_id": "123", "raw_path": "raw/note-123.md"}])
+            self.assertEqual(second["skipped"], [])
+            self.assertEqual(len(attempts), 4)
+            events = [json.loads(line) for line in vp.STATE_EVENTS_PATH.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([event["event"] for event in events], ["discovered", "failed", "processed"])
+            failed_event = events[1]
+            self.assertEqual(failed_event["item_id"], "capture:123")
+            self.assertIn("content_hash", failed_event)
+            self.assertEqual(failed_event["stage"], "wiki_ingest")
+            self.assertEqual(failed_event["error_summary"], "temporary wiki failure")
+
     def test_ingest_reuses_single_raw_source_across_grounded_split_children(self) -> None:
         with isolated_env() as (_, raw_root, wiki_root, _):
             raw_path = raw_root / "ics33-week1.md"
