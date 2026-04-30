@@ -639,8 +639,69 @@ def ingest_raw_notes(
     debug_stream: TextIO | None = None,
     log_path: Path | None = None,
     state_path: Path | None = None,
+    dry_run: bool = False,
 ) -> object:
     active_handler = integration_handler or api._default_integration_handler
+    if dry_run:
+        result = {"integrated": [], "skipped": [], "failed": [], "discovered": [], "updated": [], "processed": [], "failed_risk": []}
+        for raw_item in items:
+            try:
+                item = api._normalize_ingest_item(raw_item)
+                raw_abspath = api.ROOT / item["raw_path"]
+                if not raw_abspath.exists():
+                    raise ValueError(f"raw note does not exist for capture_id {item['capture_id']}: {item['raw_path']}")
+                frontmatter, _ = api.parse_raw_note(raw_abspath)
+                if frontmatter.get("capture_id") != item["capture_id"]:
+                    raise ValueError(
+                        f"raw note frontmatter capture_id mismatch for capture_id {item['capture_id']}: {item['raw_path']}"
+                    )
+                if frontmatter.get("source_kind") != "capture":
+                    raise ValueError(f"raw note missing capture source_kind for capture_id {item['capture_id']}: {item['raw_path']}")
+                if frontmatter.get("source_id") != api.stable_source_id("capture", item["capture_id"]):
+                    raise ValueError(f"raw note source_id mismatch for capture_id {item['capture_id']}: {item['raw_path']}")
+
+                state_item = api.raw_state_item(raw_abspath, frontmatter)
+                state_payload = {
+                    "item_id": state_item["item_id"],
+                    "source_id": state_item["source_id"],
+                    "raw_path": state_item["raw_path"],
+                    "content_hash": state_item["content_hash"],
+                }
+                prior_state = api.latest_state_record(str(state_item["item_id"]), state_path=state_path)
+                if not api.state_item_seen(str(state_item["item_id"]), state_path=state_path):
+                    discovered = {"event": "discovered", **state_payload}
+                    result["discovered"].append(discovered)
+                    api.debug_print(f"Would discover {item['capture_id']}", enabled=debug, stream=debug_stream)
+
+                legacy_integrated = (
+                    api._latest_ingest_event(capture_id=item["capture_id"], raw_path=item["raw_path"], log_path=log_path)
+                    == "integrated"
+                )
+                unchanged_in_state = (
+                    prior_state is not None
+                    and prior_state.get("content_hash") == state_item["content_hash"]
+                    and prior_state.get("event") in {"processed", "skipped", "updated"}
+                )
+                unchanged_legacy_item = prior_state is None and legacy_integrated
+                if (unchanged_in_state or unchanged_legacy_item) and not retry_failed:
+                    skipped = {"event": "skipped", **state_payload, "reason": "unchanged"}
+                    result["skipped"].append(item)
+                    api.debug_print(f"Would skip {item['capture_id']}: unchanged", enabled=debug, stream=debug_stream)
+                    continue
+
+                if prior_state is not None and prior_state.get("content_hash") != state_item["content_hash"]:
+                    updated = {"event": "updated", **state_payload}
+                    result["updated"].append(updated)
+                    api.debug_print(f"Would update {item['capture_id']}", enabled=debug, stream=debug_stream)
+
+                result["processed"].append(item)
+                api.debug_print(f"Would process {item['capture_id']}", enabled=debug, stream=debug_stream)
+            except Exception as exc:
+                fallback_item = raw_item if isinstance(raw_item, dict) else {"item": repr(raw_item)}
+                result["failed_risk"].append({"item": fallback_item, "error": str(exc)})
+                api.debug_print(f"Failed risk for ingest item: {exc}", enabled=debug, stream=debug_stream)
+        return result
+
     validated = api.validate_ingest_inputs(items)
     result = {"integrated": [], "skipped": [], "failed": []}
 

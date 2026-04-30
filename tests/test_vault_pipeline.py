@@ -1720,20 +1720,136 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertIn(("process", "end"), stage_events)
             self.assertFalse(any(event["event"] == "empty_deleted" for event in events))
 
-    def test_run_vault_pipeline_holds_lock_and_skips_wiki_ingest_on_dry_run(self) -> None:
-        with isolated_env() as (_, _, _, capture_root):
-            write_note(capture_root / "Dry.md", "Body")
+    def test_run_vault_pipeline_dry_run_audits_without_writes(self) -> None:
+        with isolated_env() as (root, raw_root, _, capture_root):
+            write_note(capture_root / "Dry.md", "Body", {"capture_id": "dry-123"})
+            before = {
+                path.relative_to(root): path.read_bytes()
+                for path in root.rglob("*")
+                if path.is_file()
+            }
             debug_stream = io.StringIO()
 
             result = vp.run_vault_pipeline(capture_root=capture_root, dry_run=True, debug=True, debug_stream=debug_stream)
 
-            self.assertIsNone(result["wiki_ingest"])
+            after = {
+                path.relative_to(root): path.read_bytes()
+                for path in root.rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(after, before)
+            self.assertFalse((root / "log.jsonl").exists())
+            self.assertFalse((root / "state" / "events.jsonl").exists())
+            self.assertFalse(any(raw_root.iterdir()))
+            self.assertEqual(result["capture_ingest"]["new_exports"], [])
+            self.assertEqual(len(result["capture_ingest"]["planned_exports"]), 1)
+            self.assertEqual(result["capture_ingest"]["audit"][0]["event"], "discovered")
+            self.assertEqual(result["capture_ingest"]["audit"][1]["event"], "processed")
+            self.assertEqual(result["wiki_ingest"]["failed_risk"][0]["item"]["capture_id"], "dry-123")
             self.assertTrue((capture_root / "Dry.md").exists())
             self.assertIn("Running capture ingest stage", debug_stream.getvalue())
+            self.assertIn("Planning wiki ingest stage", debug_stream.getvalue())
 
             with mock.patch.object(vp, "pipeline_lock", side_effect=RuntimeError("pipeline lock is already held")):
                 with self.assertRaises(RuntimeError):
                     vp.run_vault_pipeline(capture_root=capture_root)
+
+    def test_ingest_raw_notes_dry_run_audits_without_writing_wiki_or_state(self) -> None:
+        with isolated_env() as (root, raw_root, wiki_root, _):
+            raw_path = raw_root / "coffee-123.md"
+            raw_path.write_text(
+                vp.render_raw_file(
+                    capture_id="123",
+                    title="Coffee",
+                    created_at="2026-04-20T17:32:00Z",
+                    source_file="Coffee.md",
+                    body="Coffee note body.",
+                ),
+                encoding="utf-8",
+            )
+            before = {
+                path.relative_to(root): path.read_bytes()
+                for path in root.rglob("*")
+                if path.is_file()
+            }
+
+            result = vp.ingest_raw_notes([{"capture_id": "123", "raw_path": "raw/coffee-123.md"}], dry_run=True)
+
+            after = {
+                path.relative_to(root): path.read_bytes()
+                for path in root.rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(after, before)
+            self.assertFalse((wiki_root / "coffee.md").exists())
+            self.assertFalse((wiki_root / "log.md").exists())
+            self.assertFalse((root / "log.jsonl").exists())
+            self.assertFalse((root / "state" / "events.jsonl").exists())
+            self.assertEqual(result["discovered"][0]["event"], "discovered")
+            self.assertEqual(result["processed"], [{"capture_id": "123", "raw_path": "raw/coffee-123.md"}])
+            self.assertEqual(result["updated"], [])
+            self.assertEqual(result["failed_risk"], [])
+
+    def test_ingest_raw_notes_dry_run_reports_skipped_and_updated_without_appending_state(self) -> None:
+        with isolated_env() as (root, raw_root, _, _):
+            skipped_raw = raw_root / "coffee-123.md"
+            skipped_raw.write_text(
+                vp.render_raw_file(
+                    capture_id="123",
+                    title="Coffee",
+                    created_at="2026-04-20T17:32:00Z",
+                    source_file="Coffee.md",
+                    body="Coffee note body.",
+                ),
+                encoding="utf-8",
+            )
+            updated_raw = raw_root / "tea-456.md"
+            updated_raw.write_text(
+                vp.render_raw_file(
+                    capture_id="456",
+                    title="Tea",
+                    created_at="2026-04-20T17:32:00Z",
+                    source_file="Tea.md",
+                    body="Tea note body.",
+                ),
+                encoding="utf-8",
+            )
+            skipped_frontmatter, _ = vp.parse_raw_note(skipped_raw)
+            updated_frontmatter, _ = vp.parse_raw_note(updated_raw)
+            skipped_state = vp.raw_state_item(skipped_raw, skipped_frontmatter)
+            updated_state = vp.raw_state_item(updated_raw, updated_frontmatter)
+            vp.append_state_event(
+                {
+                    "event": "processed",
+                    "item_id": skipped_state["item_id"],
+                    "source_id": skipped_state["source_id"],
+                    "raw_path": skipped_state["raw_path"],
+                    "content_hash": skipped_state["content_hash"],
+                }
+            )
+            vp.append_state_event(
+                {
+                    "event": "processed",
+                    "item_id": updated_state["item_id"],
+                    "source_id": updated_state["source_id"],
+                    "raw_path": updated_state["raw_path"],
+                    "content_hash": "old-hash",
+                }
+            )
+            before_state = vp.STATE_EVENTS_PATH.read_text(encoding="utf-8")
+
+            result = vp.ingest_raw_notes(
+                [
+                    {"capture_id": "123", "raw_path": "raw/coffee-123.md"},
+                    {"capture_id": "456", "raw_path": "raw/tea-456.md"},
+                ],
+                dry_run=True,
+            )
+
+            self.assertEqual(vp.STATE_EVENTS_PATH.read_text(encoding="utf-8"), before_state)
+            self.assertEqual(result["skipped"], [{"capture_id": "123", "raw_path": "raw/coffee-123.md"}])
+            self.assertEqual(result["updated"][0]["event"], "updated")
+            self.assertEqual(result["processed"], [{"capture_id": "456", "raw_path": "raw/tea-456.md"}])
 
     def test_run_main_suppresses_empty_pipeline_result(self) -> None:
         empty_result = {

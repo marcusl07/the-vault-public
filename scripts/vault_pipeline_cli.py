@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import errno
@@ -127,7 +127,6 @@ def pipeline_lock(api: ModuleType, capture_root: Path) -> Iterator[None]:
 
 
 def discover(api: ModuleType, argv: list[str] | None = None) -> PipelinePlan:
-    _log_stage(api, "discover", "start")
     try:
         args = api.build_run_parser().parse_args(argv)
         plan = PipelinePlan(
@@ -139,18 +138,22 @@ def discover(api: ModuleType, argv: list[str] | None = None) -> PipelinePlan:
             page_resynthesis_on_touch=args.page_resynthesis_on_touch,
         )
     except Exception as exc:
-        _log_stage(api, "discover", "error", error=str(exc))
         raise
-    _log_stage(api, "discover", "end", capture_root=str(plan.capture_root), dry_run=plan.dry_run, limit=plan.limit)
+    if not plan.dry_run:
+        _log_stage(api, "discover", "start")
+        _log_stage(api, "discover", "end", capture_root=str(plan.capture_root), dry_run=plan.dry_run, limit=plan.limit)
     return plan
 
 
 def process(api: ModuleType, plan: PipelinePlan) -> object:
-    _log_stage(api, "process", "start", capture_root=str(plan.capture_root), dry_run=plan.dry_run)
+    if not plan.dry_run:
+        _log_stage(api, "process", "start", capture_root=str(plan.capture_root), dry_run=plan.dry_run)
     try:
-        with api.pipeline_lock(plan.capture_root):
+        lock_context = nullcontext() if plan.dry_run else api.pipeline_lock(plan.capture_root)
+        with lock_context:
             api.debug_print("Running capture ingest stage", enabled=plan.debug, stream=plan.debug_stream)
-            _log_stage(api, "capture_ingest", "start", capture_root=str(plan.capture_root), dry_run=plan.dry_run)
+            if not plan.dry_run:
+                _log_stage(api, "capture_ingest", "start", capture_root=str(plan.capture_root), dry_run=plan.dry_run)
             try:
                 capture_result = api.capture_ingest(
                     capture_root=plan.capture_root,
@@ -161,22 +164,35 @@ def process(api: ModuleType, plan: PipelinePlan) -> object:
                     debug_stream=plan.debug_stream,
                 )
             except Exception as exc:
-                api.append_jsonl_event(
-                    {"event": "capture_stage_crashed", "error": str(exc), "capture_root": str(plan.capture_root)},
-                    log_path=api.JSONL_LOG_PATH,
-                )
-                _log_stage(api, "capture_ingest", "error", error=str(exc))
+                if not plan.dry_run:
+                    api.append_jsonl_event(
+                        {"event": "capture_stage_crashed", "error": str(exc), "capture_root": str(plan.capture_root)},
+                        log_path=api.JSONL_LOG_PATH,
+                    )
+                    _log_stage(api, "capture_ingest", "error", error=str(exc))
                 raise
-            _log_stage(
-                api,
-                "capture_ingest",
-                "end",
-                new_exports=len(capture_result["new_exports"]),
-                errors=len(capture_result["errors"]),
-            )
+            if not plan.dry_run:
+                _log_stage(
+                    api,
+                    "capture_ingest",
+                    "end",
+                    new_exports=len(capture_result["new_exports"]),
+                    errors=len(capture_result["errors"]),
+                )
 
             wiki_ingest = None
-            if not plan.dry_run:
+            if plan.dry_run:
+                planned_exports = capture_result.get("planned_exports", [])
+                api.debug_print("Planning wiki ingest stage", enabled=plan.debug, stream=plan.debug_stream)
+                wiki_ingest = api.ingest_raw_notes(
+                    planned_exports,
+                    retry_failed=plan.retry_failed,
+                    page_resynthesis_on_touch=plan.page_resynthesis_on_touch,
+                    debug=plan.debug,
+                    debug_stream=plan.debug_stream,
+                    dry_run=True,
+                )
+            else:
                 api.debug_print("Running wiki ingest stage", enabled=plan.debug, stream=plan.debug_stream)
                 _log_stage(api, "wiki_ingest", "start")
                 wiki_ingest = api.ingest_raw_notes(
@@ -197,17 +213,29 @@ def process(api: ModuleType, plan: PipelinePlan) -> object:
 
             result = {"capture_ingest": capture_result, "wiki_ingest": wiki_ingest}
     except Exception as exc:
-        _log_stage(api, "process", "error", error=str(exc))
+        if not plan.dry_run:
+            _log_stage(api, "process", "error", error=str(exc))
         raise
-    _log_stage(api, "process", "end")
+    if not plan.dry_run:
+        _log_stage(api, "process", "end")
     return result
 
 
 def write_outputs(api: ModuleType, result: object) -> int:
-    _log_stage(api, "write_outputs", "start", has_output=api.pipeline_run_has_output(result))
+    dry_run = isinstance(result, dict) and (
+        bool(result.get("capture_ingest", {}).get("planned_exports"))
+        or bool(result.get("capture_ingest", {}).get("audit"))
+        or bool(result.get("wiki_ingest", {}).get("processed"))
+        or bool(result.get("wiki_ingest", {}).get("discovered"))
+        or bool(result.get("wiki_ingest", {}).get("updated"))
+        or bool(result.get("wiki_ingest", {}).get("failed_risk"))
+    )
+    if not dry_run:
+        _log_stage(api, "write_outputs", "start", has_output=api.pipeline_run_has_output(result))
     if api.pipeline_run_has_output(result):
         print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
-    _log_stage(api, "write_outputs", "end")
+    if not dry_run:
+        _log_stage(api, "write_outputs", "end")
     return 0
 
 
@@ -249,6 +277,12 @@ def pipeline_run_has_output(result: object) -> bool:
     if isinstance(wiki_result, dict):
         if wiki_result.get("integrated") or wiki_result.get("skipped") or wiki_result.get("failed"):
             return True
+        if wiki_result.get("discovered") or wiki_result.get("updated") or wiki_result.get("processed") or wiki_result.get("failed_risk"):
+            return True
+
+    if isinstance(capture_result, dict):
+        if capture_result.get("planned_exports") or capture_result.get("audit") or capture_result.get("failed_risk"):
+            return True
 
     return False
 
@@ -275,6 +309,7 @@ def build_capture_parser(api: ModuleType) -> argparse.ArgumentParser:
 def build_ingest_parser(api: ModuleType) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Ingest raw notes into the wiki.")
     parser.add_argument("--debug", action="store_true", help="Emit human-readable debug output to stderr.")
+    parser.add_argument("--dry-run", action="store_true", help="Report actions without mutating state.")
     parser.add_argument("--retry-failed", action="store_true", help="Re-run notes already marked integrated.")
     parser.add_argument(
         "--page-resynthesis-on-touch",
@@ -335,6 +370,7 @@ def ingest_main(api: ModuleType, argv: list[str] | None = None) -> int:
         retry_failed=args.retry_failed,
         page_resynthesis_on_touch=args.page_resynthesis_on_touch,
         debug=args.debug,
+        dry_run=args.dry_run,
     )
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
     return 0

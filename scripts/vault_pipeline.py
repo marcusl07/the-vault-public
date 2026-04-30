@@ -1199,6 +1199,7 @@ def ingest_raw_notes(
     debug_stream: TextIO | None = None,
     log_path: Path | None = None,
     state_path: Path | None = None,
+    dry_run: bool = False,
 ) -> IngestResult:
     return wiki_impl.ingest_raw_notes(
         sys.modules[__name__],
@@ -1210,6 +1211,7 @@ def ingest_raw_notes(
         debug_stream=debug_stream,
         log_path=log_path,
         state_path=state_path,
+        dry_run=dry_run,
     )
 
 

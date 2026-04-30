@@ -135,6 +135,10 @@ def capture_ingest(
     debug_stream: TextIO | None = None,
 ) -> object:
     result = {"new_exports": [], "errors": []}
+    if dry_run:
+        result["planned_exports"] = []
+        result["audit"] = []
+        result["failed_risk"] = []
     processed = 0
     candidate_paths = api.discover_capture_candidates(capture_root)
     processed_candidate_paths = api.discover_processed_capture_candidates(capture_root)
@@ -152,6 +156,17 @@ def capture_ingest(
 
         if note.ingest_attempts >= 3 and not retry_failed:
             capture_id = note.capture_id
+            if dry_run:
+                result["audit"].append(
+                    {
+                        "event": "skipped",
+                        "capture_id": capture_id,
+                        "filename": note.filename,
+                        "reason": "ingest_attempts_over_threshold",
+                    }
+                )
+                api.debug_print(f"Would skip {note.filename}: ingest attempts over threshold", enabled=debug, stream=debug_stream)
+                continue
             if capture_id and not api._has_logged_event(
                 "skipped_over_threshold",
                 capture_id=capture_id,
@@ -173,6 +188,7 @@ def capture_ingest(
 
         if api.source_note_body_is_blank(note) and api.is_placeholder_title(title):
             if dry_run:
+                result["audit"].append({"event": "processed", "filename": note.filename, "action": "would_delete_empty"})
                 api.debug_print(f"Would delete empty note {note.filename}", enabled=debug, stream=debug_stream)
                 processed += 1
                 continue
@@ -190,6 +206,7 @@ def capture_ingest(
 
         if note.capture_id is None:
             if dry_run:
+                result["audit"].append({"event": "processed", "filename": note.filename, "action": "would_inject_capture_id"})
                 api.debug_print(f"Would inject capture_id into {note.filename}", enabled=debug, stream=debug_stream)
                 processed += 1
                 continue
@@ -207,15 +224,27 @@ def capture_ingest(
 
         capture_id = note.capture_id
         assert capture_id is not None
-        api.append_jsonl_event({"event": "discovered", "capture_id": capture_id, "filename": note.filename}, log_path=log_path)
+        if dry_run:
+            result["audit"].append({"event": "discovered", "capture_id": capture_id, "filename": note.filename})
+        else:
+            api.append_jsonl_event({"event": "discovered", "capture_id": capture_id, "filename": note.filename}, log_path=log_path)
         created_at, used_mtime_fallback = api.resolve_created_at(note)
         if used_mtime_fallback:
-            api.append_jsonl_event(
-                {"event": "created_at_mtime_fallback", "capture_id": capture_id, "filename": note.filename},
-                log_path=log_path,
-            )
+            if dry_run:
+                result["audit"].append({"event": "updated", "capture_id": capture_id, "filename": note.filename, "action": "would_use_mtime_created_at"})
+            else:
+                api.append_jsonl_event(
+                    {"event": "created_at_mtime_fallback", "capture_id": capture_id, "filename": note.filename},
+                    log_path=log_path,
+                )
 
         if source_capture_id_counts.get(capture_id, 0) > 1:
+            if dry_run:
+                result["failed_risk"].append(
+                    {"filename": note.filename, "capture_id": capture_id, "reason": "source_identity_ambiguous"}
+                )
+                processed += 1
+                continue
             try:
                 api._record_retry_gated_export_failure(
                     note=note,
@@ -235,6 +264,10 @@ def capture_ingest(
         try:
             raw_target, export_mode, candidate_count = api.resolve_raw_path_for_capture(title=title, capture_id=capture_id)
         except Exception as exc:
+            if dry_run:
+                result["failed_risk"].append({"filename": note.filename, "capture_id": capture_id, "reason": str(exc)})
+                processed += 1
+                continue
             try:
                 api._record_retry_gated_export_failure(
                     note=note,
@@ -253,6 +286,18 @@ def capture_ingest(
         export_item = {"capture_id": capture_id, "raw_path": raw_repo_path}
 
         if dry_run:
+            result["planned_exports"].append(export_item)
+            result["audit"].append(
+                {
+                    "event": "processed",
+                    "capture_id": capture_id,
+                    "filename": note.filename,
+                    "raw_path": raw_repo_path,
+                    "action": "would_export",
+                    "mode": export_mode,
+                    "candidate_count": candidate_count,
+                }
+            )
             api.debug_print(f"Would export {note.filename} -> {raw_repo_path}", enabled=debug, stream=debug_stream)
             processed += 1
             continue
