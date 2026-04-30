@@ -33,10 +33,16 @@ class WrapperDispatchTests(unittest.TestCase):
         self.assertEqual(result, 23)
 
     def test_run_wrapper_delegates_to_vault_pipeline(self) -> None:
-        with mock.patch.object(run_vault_pipeline.vp, "run_main", return_value=31) as run_main:
+        plan = object()
+        result_payload = {"capture_ingest": {"new_exports": [], "errors": []}, "wiki_ingest": None}
+        with mock.patch.object(run_vault_pipeline.vp, "discover", return_value=plan) as discover, mock.patch.object(
+            run_vault_pipeline.vp, "process", return_value=result_payload
+        ) as process, mock.patch.object(run_vault_pipeline.vp, "write_outputs", return_value=31) as write_outputs:
             result = run_vault_pipeline.main(["--dry-run"])
 
-        run_main.assert_called_once_with(["--dry-run"])
+        discover.assert_called_once_with(["--dry-run"])
+        process.assert_called_once_with(plan)
+        write_outputs.assert_called_once_with(result_payload)
         self.assertEqual(result, 31)
 
 
@@ -185,6 +191,8 @@ class SyncPublicMirrorTests(unittest.TestCase):
             (source_root / "wiki").mkdir()
             (source_root / "wiki" / "index.md").write_text("private wiki\n", encoding="utf-8")
             (source_root / "log.jsonl").write_text("{}\n", encoding="utf-8")
+            (source_root / "state").mkdir()
+            (source_root / "state" / "events.jsonl").write_text("{}\n", encoding="utf-8")
 
             (dest_root / "stale.txt").write_text("remove me\n", encoding="utf-8")
             (dest_root / "old").mkdir()
@@ -198,6 +206,7 @@ class SyncPublicMirrorTests(unittest.TestCase):
             self.assertFalse((dest_root / "raw" / "secret.md").exists())
             self.assertFalse((dest_root / "wiki" / "index.md").exists())
             self.assertFalse((dest_root / "log.jsonl").exists())
+            self.assertFalse((dest_root / "state" / "events.jsonl").exists())
             self.assertFalse((dest_root / "stale.txt").exists())
             self.assertFalse((dest_root / "old").exists())
             self.assertTrue((dest_root / ".git" / "config").is_file())

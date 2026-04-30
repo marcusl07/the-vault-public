@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 import errno
 import fcntl
@@ -14,6 +15,23 @@ import uuid
 
 if TYPE_CHECKING:
     from types import ModuleType
+
+
+@dataclass(frozen=True)
+class PipelinePlan:
+    capture_root: Path
+    debug: bool = False
+    dry_run: bool = False
+    limit: int | None = None
+    retry_failed: bool = False
+    page_resynthesis_on_touch: bool = False
+    debug_stream: TextIO | None = None
+
+
+def _log_stage(api: ModuleType, stage: str, status: str, **details: object) -> None:
+    payload = {"event": "pipeline_stage", "stage": stage, "status": status}
+    payload.update(details)
+    api.append_jsonl_event(payload, log_path=api.JSONL_LOG_PATH)
 
 
 @contextmanager
@@ -108,6 +126,91 @@ def pipeline_lock(api: ModuleType, capture_root: Path) -> Iterator[None]:
             stale_claim_path.unlink(missing_ok=True)
 
 
+def discover(api: ModuleType, argv: list[str] | None = None) -> PipelinePlan:
+    _log_stage(api, "discover", "start")
+    try:
+        args = api.build_run_parser().parse_args(argv)
+        plan = PipelinePlan(
+            capture_root=args.capture_root,
+            debug=args.debug,
+            dry_run=args.dry_run,
+            limit=args.limit,
+            retry_failed=args.retry_failed,
+            page_resynthesis_on_touch=args.page_resynthesis_on_touch,
+        )
+    except Exception as exc:
+        _log_stage(api, "discover", "error", error=str(exc))
+        raise
+    _log_stage(api, "discover", "end", capture_root=str(plan.capture_root), dry_run=plan.dry_run, limit=plan.limit)
+    return plan
+
+
+def process(api: ModuleType, plan: PipelinePlan) -> object:
+    _log_stage(api, "process", "start", capture_root=str(plan.capture_root), dry_run=plan.dry_run)
+    try:
+        with api.pipeline_lock(plan.capture_root):
+            api.debug_print("Running capture ingest stage", enabled=plan.debug, stream=plan.debug_stream)
+            _log_stage(api, "capture_ingest", "start", capture_root=str(plan.capture_root), dry_run=plan.dry_run)
+            try:
+                capture_result = api.capture_ingest(
+                    capture_root=plan.capture_root,
+                    debug=plan.debug,
+                    dry_run=plan.dry_run,
+                    limit=plan.limit,
+                    retry_failed=plan.retry_failed,
+                    debug_stream=plan.debug_stream,
+                )
+            except Exception as exc:
+                api.append_jsonl_event(
+                    {"event": "capture_stage_crashed", "error": str(exc), "capture_root": str(plan.capture_root)},
+                    log_path=api.JSONL_LOG_PATH,
+                )
+                _log_stage(api, "capture_ingest", "error", error=str(exc))
+                raise
+            _log_stage(
+                api,
+                "capture_ingest",
+                "end",
+                new_exports=len(capture_result["new_exports"]),
+                errors=len(capture_result["errors"]),
+            )
+
+            wiki_ingest = None
+            if not plan.dry_run:
+                api.debug_print("Running wiki ingest stage", enabled=plan.debug, stream=plan.debug_stream)
+                _log_stage(api, "wiki_ingest", "start")
+                wiki_ingest = api.ingest_raw_notes(
+                    capture_result["new_exports"],
+                    retry_failed=plan.retry_failed,
+                    page_resynthesis_on_touch=plan.page_resynthesis_on_touch,
+                    debug=plan.debug,
+                    debug_stream=plan.debug_stream,
+                )
+                _log_stage(
+                    api,
+                    "wiki_ingest",
+                    "end",
+                    integrated=len(wiki_ingest["integrated"]),
+                    skipped=len(wiki_ingest["skipped"]),
+                    failed=len(wiki_ingest["failed"]),
+                )
+
+            result = {"capture_ingest": capture_result, "wiki_ingest": wiki_ingest}
+    except Exception as exc:
+        _log_stage(api, "process", "error", error=str(exc))
+        raise
+    _log_stage(api, "process", "end")
+    return result
+
+
+def write_outputs(api: ModuleType, result: object) -> int:
+    _log_stage(api, "write_outputs", "start", has_output=api.pipeline_run_has_output(result))
+    if api.pipeline_run_has_output(result):
+        print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+    _log_stage(api, "write_outputs", "end")
+    return 0
+
+
 def run_vault_pipeline(
     api: ModuleType,
     *,
@@ -119,36 +222,18 @@ def run_vault_pipeline(
     page_resynthesis_on_touch: bool = False,
     debug_stream: TextIO | None = None,
 ) -> object:
-    with api.pipeline_lock(capture_root):
-        api.debug_print("Running capture ingest stage", enabled=debug, stream=debug_stream)
-        try:
-            capture_result = api.capture_ingest(
-                capture_root=capture_root,
-                debug=debug,
-                dry_run=dry_run,
-                limit=limit,
-                retry_failed=retry_failed,
-                debug_stream=debug_stream,
-            )
-        except Exception as exc:
-            api.append_jsonl_event(
-                {"event": "capture_stage_crashed", "error": str(exc), "capture_root": str(capture_root)},
-                log_path=api.JSONL_LOG_PATH,
-            )
-            raise
-
-        wiki_ingest = None
-        if not dry_run:
-            api.debug_print("Running wiki ingest stage", enabled=debug, stream=debug_stream)
-            wiki_ingest = api.ingest_raw_notes(
-                capture_result["new_exports"],
-                retry_failed=retry_failed,
-                page_resynthesis_on_touch=page_resynthesis_on_touch,
-                debug=debug,
-                debug_stream=debug_stream,
-            )
-
-        return {"capture_ingest": capture_result, "wiki_ingest": wiki_ingest}
+    return process(
+        api,
+        PipelinePlan(
+            capture_root=capture_root,
+            debug=debug,
+            dry_run=dry_run,
+            limit=limit,
+            retry_failed=retry_failed,
+            page_resynthesis_on_touch=page_resynthesis_on_touch,
+            debug_stream=debug_stream,
+        ),
+    )
 
 
 def pipeline_run_has_output(result: object) -> bool:
@@ -256,15 +341,6 @@ def ingest_main(api: ModuleType, argv: list[str] | None = None) -> int:
 
 
 def run_main(api: ModuleType, argv: list[str] | None = None) -> int:
-    args = api.build_run_parser().parse_args(argv)
-    result = api.run_vault_pipeline(
-        capture_root=args.capture_root,
-        debug=args.debug,
-        dry_run=args.dry_run,
-        limit=args.limit,
-        retry_failed=args.retry_failed,
-        page_resynthesis_on_touch=args.page_resynthesis_on_touch,
-    )
-    if api.pipeline_run_has_output(result):
-        print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
-    return 0
+    plan = api.discover(argv)
+    result = api.process(plan)
+    return api.write_outputs(result)

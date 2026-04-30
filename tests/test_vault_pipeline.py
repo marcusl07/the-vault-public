@@ -22,6 +22,7 @@ def isolated_env() -> tuple[Path, Path, Path, Path]:
     original_chat_sources_root = vp.CHAT_SOURCES_ROOT
     original_wiki_root = vp.WIKI_ROOT
     original_log_path = vp.JSONL_LOG_PATH
+    original_state_events_path = vp.STATE_EVENTS_PATH
     original_capture_root = vp.DEFAULT_CAPTURE_ROOT
 
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -41,6 +42,7 @@ def isolated_env() -> tuple[Path, Path, Path, Path]:
         vp.CHAT_SOURCES_ROOT = sources_root / "chat"
         vp.WIKI_ROOT = wiki_root
         vp.JSONL_LOG_PATH = root / "log.jsonl"
+        vp.STATE_EVENTS_PATH = root / "state" / "events.jsonl"
         vp.DEFAULT_CAPTURE_ROOT = capture_root
         vp.bw.configure_workspace(root)
         try:
@@ -52,6 +54,7 @@ def isolated_env() -> tuple[Path, Path, Path, Path]:
             vp.CHAT_SOURCES_ROOT = original_chat_sources_root
             vp.WIKI_ROOT = original_wiki_root
             vp.JSONL_LOG_PATH = original_log_path
+            vp.STATE_EVENTS_PATH = original_state_events_path
             vp.DEFAULT_CAPTURE_ROOT = original_capture_root
             vp.bw.configure_workspace(original_root)
 
@@ -1080,6 +1083,86 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertEqual(result["integrated"], [])
             self.assertEqual(result["skipped"], [{"capture_id": "123", "raw_path": "raw/note-123.md"}])
 
+    def test_ingest_raw_notes_writes_append_only_state_and_skips_unchanged_content(self) -> None:
+        with isolated_env() as (_, raw_root, _, _):
+            raw_path = raw_root / "note-123.md"
+            raw_path.write_text(
+                vp.render_raw_file(
+                    capture_id="123",
+                    title="Note 1",
+                    created_at="2026-04-20T17:32:00Z",
+                    source_file="Note 1.md",
+                    body="Stable body.",
+                ),
+                encoding="utf-8",
+            )
+            handled: list[tuple[str, Path]] = []
+
+            def handler(capture_id: str, path: Path) -> None:
+                handled.append((capture_id, path))
+
+            first = vp.ingest_raw_notes(
+                [{"capture_id": "123", "raw_path": "raw/note-123.md"}],
+                integration_handler=handler,
+            )
+            second = vp.ingest_raw_notes(
+                [{"capture_id": "123", "raw_path": "raw/note-123.md"}],
+                integration_handler=handler,
+            )
+
+            self.assertEqual(first["integrated"], [{"capture_id": "123", "raw_path": "raw/note-123.md"}])
+            self.assertEqual(second["skipped"], [{"capture_id": "123", "raw_path": "raw/note-123.md"}])
+            self.assertEqual(len(handled), 1)
+            events = [json.loads(line) for line in vp.STATE_EVENTS_PATH.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([event["event"] for event in events], ["discovered", "processed", "discovered", "skipped"])
+            self.assertTrue(all(event["item_id"] == "capture:123" for event in events))
+            self.assertTrue(all("content_hash" in event for event in events))
+
+    def test_ingest_raw_notes_reprocesses_changed_content_from_state(self) -> None:
+        with isolated_env() as (_, raw_root, _, _):
+            raw_path = raw_root / "note-123.md"
+            raw_path.write_text(
+                vp.render_raw_file(
+                    capture_id="123",
+                    title="Note 1",
+                    created_at="2026-04-20T17:32:00Z",
+                    source_file="Note 1.md",
+                    body="Original body.",
+                ),
+                encoding="utf-8",
+            )
+            handled: list[str] = []
+
+            def handler(capture_id: str, path: Path) -> None:
+                handled.append(path.read_text(encoding="utf-8"))
+
+            vp.ingest_raw_notes(
+                [{"capture_id": "123", "raw_path": "raw/note-123.md"}],
+                integration_handler=handler,
+            )
+            raw_path.write_text(
+                vp.render_raw_file(
+                    capture_id="123",
+                    title="Note 1",
+                    created_at="2026-04-20T17:32:00Z",
+                    source_file="Note 1.md",
+                    body="Changed body.",
+                ),
+                encoding="utf-8",
+            )
+
+            result = vp.ingest_raw_notes(
+                [{"capture_id": "123", "raw_path": "raw/note-123.md"}],
+                integration_handler=handler,
+            )
+
+            self.assertEqual(result["integrated"], [{"capture_id": "123", "raw_path": "raw/note-123.md"}])
+            self.assertEqual(len(handled), 2)
+            self.assertIn("Changed body.", handled[-1])
+            events = [json.loads(line) for line in vp.STATE_EVENTS_PATH.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([event["event"] for event in events], ["discovered", "processed", "discovered", "updated", "processed"])
+            self.assertNotEqual(events[1]["content_hash"], events[3]["content_hash"])
+
     def test_ingest_reuses_single_raw_source_across_grounded_split_children(self) -> None:
         with isolated_env() as (_, raw_root, wiki_root, _):
             raw_path = raw_root / "ics33-week1.md"
@@ -1551,10 +1634,19 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertIn("[../raw/i-like-eating-grapes-", review_text)
 
             events = [json.loads(line) for line in vp.JSONL_LOG_PATH.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(
-                [event["event"] for event in events],
-                ["discovered", "exported_to_raw", "marked_processed", "integrated"],
-            )
+            domain_events = [event["event"] for event in events if event["event"] != "pipeline_stage"]
+            self.assertEqual(domain_events, ["discovered", "exported_to_raw", "marked_processed", "integrated"])
+            stage_events = [
+                (event["stage"], event["status"])
+                for event in events
+                if event["event"] == "pipeline_stage"
+            ]
+            self.assertIn(("process", "start"), stage_events)
+            self.assertIn(("capture_ingest", "start"), stage_events)
+            self.assertIn(("capture_ingest", "end"), stage_events)
+            self.assertIn(("wiki_ingest", "start"), stage_events)
+            self.assertIn(("wiki_ingest", "end"), stage_events)
+            self.assertIn(("process", "end"), stage_events)
             self.assertFalse(any(event["event"] == "empty_deleted" for event in events))
 
     def test_run_vault_pipeline_holds_lock_and_skips_wiki_ingest_on_dry_run(self) -> None:
@@ -1580,7 +1672,7 @@ class VaultPipelineTests(unittest.TestCase):
 
         with isolated_env() as (_, _, _, capture_root):
             stdout = io.StringIO()
-            with mock.patch.object(vp, "run_vault_pipeline", return_value=empty_result):
+            with mock.patch.object(vp, "process", return_value=empty_result):
                 with redirect_stdout(stdout):
                     result = vp.run_main(["--capture-root", str(capture_root)])
 
@@ -1602,7 +1694,7 @@ class VaultPipelineTests(unittest.TestCase):
 
         with isolated_env() as (_, _, _, capture_root):
             stdout = io.StringIO()
-            with mock.patch.object(vp, "run_vault_pipeline", return_value=nonempty_result):
+            with mock.patch.object(vp, "process", return_value=nonempty_result):
                 with redirect_stdout(stdout):
                     result = vp.run_main(["--capture-root", str(capture_root)])
 

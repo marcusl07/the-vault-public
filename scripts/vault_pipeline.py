@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -41,6 +42,7 @@ SOURCES_ROOT = ROOT / "sources"
 CHAT_SOURCES_ROOT = SOURCES_ROOT / "chat"
 WIKI_ROOT = ROOT / "wiki"
 JSONL_LOG_PATH = ROOT / "log.jsonl"
+STATE_EVENTS_PATH = ROOT / "state" / "events.jsonl"
 DEFAULT_CAPTURE_ROOT = Path(
     "capture"
 )
@@ -54,7 +56,7 @@ _CONNECTION_SLUG_RE = re.compile(r"\[\[(?P<slug>[^\]]+)\]\]")
 
 
 def configure_workspace(root: Path, *, capture_root: Path | None = None) -> None:
-    global ROOT, RAW_ROOT, SOURCES_ROOT, CHAT_SOURCES_ROOT, WIKI_ROOT, JSONL_LOG_PATH, DEFAULT_CAPTURE_ROOT
+    global ROOT, RAW_ROOT, SOURCES_ROOT, CHAT_SOURCES_ROOT, WIKI_ROOT, JSONL_LOG_PATH, STATE_EVENTS_PATH, DEFAULT_CAPTURE_ROOT
 
     ROOT = root
     RAW_ROOT = ROOT / "raw"
@@ -62,6 +64,7 @@ def configure_workspace(root: Path, *, capture_root: Path | None = None) -> None
     CHAT_SOURCES_ROOT = SOURCES_ROOT / "chat"
     WIKI_ROOT = ROOT / "wiki"
     JSONL_LOG_PATH = ROOT / "log.jsonl"
+    STATE_EVENTS_PATH = ROOT / "state" / "events.jsonl"
     DEFAULT_CAPTURE_ROOT = capture_root or ROOT / "capture"
     bw.configure_workspace(root)
 
@@ -79,7 +82,7 @@ def temporary_workspace(root: Path, *, capture_root: Path | None = None) -> Iter
 
 
 def _workspace_snapshot() -> tuple[Path, ...]:
-    return (ROOT, RAW_ROOT, SOURCES_ROOT, CHAT_SOURCES_ROOT, WIKI_ROOT, JSONL_LOG_PATH, DEFAULT_CAPTURE_ROOT)
+    return (ROOT, RAW_ROOT, SOURCES_ROOT, CHAT_SOURCES_ROOT, WIKI_ROOT, JSONL_LOG_PATH, STATE_EVENTS_PATH, DEFAULT_CAPTURE_ROOT)
 
 
 def _restore_workspace_kwargs(original: tuple[Path, ...]) -> dict[str, Path]:
@@ -367,6 +370,49 @@ def append_jsonl_event(payload: dict[str, object], log_path: Path | None = None)
         handle.write(json.dumps({"ts": utc_timestamp(), **payload}, ensure_ascii=False, separators=(",", ":")) + "\n")
         handle.flush()
         os.fsync(handle.fileno())
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def append_state_event(payload: dict[str, object], state_path: Path | None = None) -> None:
+    append_jsonl_event(payload, log_path=state_path or STATE_EVENTS_PATH)
+
+
+def raw_state_item(raw_path: Path, frontmatter: dict[str, object]) -> dict[str, object]:
+    source_id = frontmatter.get("source_id")
+    if not isinstance(source_id, str) or not source_id:
+        capture_id = frontmatter.get("capture_id")
+        if isinstance(capture_id, str) and capture_id:
+            source_id = stable_source_id("capture", capture_id)
+    content_hash = sha256_file(raw_path)
+    return {
+        "item_id": source_id if source_id else f"sha256:{content_hash}",
+        "source_id": source_id,
+        "raw_path": normalize_repo_path(raw_path),
+        "content_hash": content_hash,
+    }
+
+
+def latest_state_record(item_id: str, state_path: Path | None = None) -> dict[str, object] | None:
+    effective_state_path = state_path or STATE_EVENTS_PATH
+    if not effective_state_path.exists():
+        return None
+    latest: dict[str, object] | None = None
+    for line in effective_state_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        payload = json.loads(line)
+        if payload.get("item_id") != item_id:
+            continue
+        if payload.get("event") in {"processed", "skipped", "updated"}:
+            latest = payload
+    return latest
 
 
 def _latest_ingest_event(
@@ -1139,6 +1185,7 @@ def ingest_raw_notes(
     debug: bool = False,
     debug_stream: TextIO | None = None,
     log_path: Path | None = None,
+    state_path: Path | None = None,
 ) -> IngestResult:
     return wiki_impl.ingest_raw_notes(
         sys.modules[__name__],
@@ -1149,6 +1196,7 @@ def ingest_raw_notes(
         debug=debug,
         debug_stream=debug_stream,
         log_path=log_path,
+        state_path=state_path,
     )
 
 
@@ -1178,6 +1226,18 @@ def run_vault_pipeline(
         page_resynthesis_on_touch=page_resynthesis_on_touch,
         debug_stream=debug_stream,
     )
+
+
+def discover(argv: list[str] | None = None) -> cli_impl.PipelinePlan:
+    return cli_impl.discover(sys.modules[__name__], argv)
+
+
+def process(plan: cli_impl.PipelinePlan) -> PipelineRunResult:
+    return cli_impl.process(sys.modules[__name__], plan)
+
+
+def write_outputs(result: object) -> int:
+    return cli_impl.write_outputs(sys.modules[__name__], result)
 
 
 def pipeline_run_has_output(result: object) -> bool:

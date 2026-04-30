@@ -638,6 +638,7 @@ def ingest_raw_notes(
     debug: bool = False,
     debug_stream: TextIO | None = None,
     log_path: Path | None = None,
+    state_path: Path | None = None,
 ) -> object:
     active_handler = integration_handler or api._default_integration_handler
     validated = api.validate_ingest_inputs(items)
@@ -645,7 +646,28 @@ def ingest_raw_notes(
 
     for item in validated:
         raw_abspath = api.ROOT / item["raw_path"]
-        if api._latest_ingest_event(capture_id=item["capture_id"], raw_path=item["raw_path"], log_path=log_path) == "integrated" and not retry_failed:
+        frontmatter, _ = api.parse_raw_note(raw_abspath)
+        state_item = api.raw_state_item(raw_abspath, frontmatter)
+        state_payload = {
+            "item_id": state_item["item_id"],
+            "source_id": state_item["source_id"],
+            "raw_path": state_item["raw_path"],
+            "content_hash": state_item["content_hash"],
+        }
+        api.append_state_event({"event": "discovered", **state_payload}, state_path=state_path)
+        prior_state = api.latest_state_record(str(state_item["item_id"]), state_path=state_path)
+        legacy_integrated = (
+            api._latest_ingest_event(capture_id=item["capture_id"], raw_path=item["raw_path"], log_path=log_path)
+            == "integrated"
+        )
+        unchanged_in_state = (
+            prior_state is not None
+            and prior_state.get("content_hash") == state_item["content_hash"]
+            and prior_state.get("event") in {"processed", "skipped", "updated"}
+        )
+        unchanged_legacy_item = prior_state is None and legacy_integrated
+        if (unchanged_in_state or unchanged_legacy_item) and not retry_failed:
+            api.append_state_event({"event": "skipped", **state_payload, "reason": "unchanged"}, state_path=state_path)
             result["skipped"].append(item)
             continue
 
@@ -664,6 +686,9 @@ def ingest_raw_notes(
                     {"event": "integrated", "capture_id": item["capture_id"], "raw_path": item["raw_path"]},
                     log_path=log_path,
                 )
+                if prior_state is not None and prior_state.get("content_hash") != state_item["content_hash"]:
+                    api.append_state_event({"event": "updated", **state_payload}, state_path=state_path)
+                api.append_state_event({"event": "processed", **state_payload}, state_path=state_path)
                 api.debug_print(f"Integrated {item['capture_id']}", enabled=debug, stream=debug_stream)
                 result["integrated"].append(item)
                 last_error = None

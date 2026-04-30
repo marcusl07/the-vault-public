@@ -23,6 +23,7 @@ DEFAULT_EXCLUDES = {
     "wiki",
     "ingest.log",
     "log.jsonl",
+    "state",
     "AGENTS.md",
 }
 
