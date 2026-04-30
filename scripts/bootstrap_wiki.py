@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import date
 import hashlib
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -22,6 +21,23 @@ try:
     from scripts.workspace_fs import temporary_workspace as shared_temporary_workspace
     from scripts import bootstrap_wiki_cache as cache_impl
     from scripts import bootstrap_wiki_cli as cli_impl
+    from scripts.bootstrap_wiki_model import (
+        BOILERPLATE_PATTERNS,
+        CATALOG_PATH,
+        HIGH_SIGNAL_INBOUND_THRESHOLD,
+        INDEX_SECTION_ORDER,
+        PAGE_SHAPE_ATOMIC,
+        PAGE_SHAPE_TOPIC,
+        TODAY,
+        Page,
+        ParsedWikiPage,
+        SourceRecord,
+        classify_page,
+        compact_source_text,
+        ordered_unique,
+        page_title,
+        strip_markdown,
+    )
     from scripts import bootstrap_wiki_parsing as parsing_impl
     from scripts import bootstrap_wiki_remote as remote_impl
     from scripts import bootstrap_wiki_rendering as rendering_impl
@@ -31,6 +47,23 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution path
     from workspace_fs import temporary_workspace as shared_temporary_workspace
     import bootstrap_wiki_cache as cache_impl
     import bootstrap_wiki_cli as cli_impl
+    from bootstrap_wiki_model import (
+        BOILERPLATE_PATTERNS,
+        CATALOG_PATH,
+        HIGH_SIGNAL_INBOUND_THRESHOLD,
+        INDEX_SECTION_ORDER,
+        PAGE_SHAPE_ATOMIC,
+        PAGE_SHAPE_TOPIC,
+        TODAY,
+        Page,
+        ParsedWikiPage,
+        SourceRecord,
+        classify_page,
+        compact_source_text,
+        ordered_unique,
+        page_title,
+        strip_markdown,
+    )
     import bootstrap_wiki_parsing as parsing_impl
     import bootstrap_wiki_remote as remote_impl
     import bootstrap_wiki_rendering as rendering_impl
@@ -47,8 +80,6 @@ CACHE_PAGES_ROOT = CACHE_ROOT / "pages"
 CACHE_MANIFEST_PATH = CACHE_ROOT / "manifest.json"
 RENDER_STAGE_ROOT = ROOT / ".wiki-render-staging"
 RENDER_BACKUP_ROOT = ROOT / ".wiki-render-backup"
-
-TODAY = date.today().isoformat()
 
 GENERIC_COMPONENTS = {
     "apple notes",
@@ -95,78 +126,11 @@ COMPONENT_ALIASES = {
     "self notes": "self-reflection",
 }
 
-TITLE_ALIASES = {
-    "gtd": "GTD",
-    "uci": "UCI",
-    "ics-33": "ICS 33",
-    "math-2a": "Math 2A",
-    "math-2b": "Math 2B",
-    "math-3a": "Math 3A",
-    "stats-7": "Stats 7",
-    "stats-67": "Stats 67",
-    "writing-50": "Writing 50",
-    "ai-photonics": "AI Photonics",
-    "fpl-23-24": "FPL 23-24",
-    "football-manager": "Football Manager",
-    "fantasy-premier-league": "Fantasy Premier League",
-    "apple-notes": "Apple Notes",
-    "moka-pot": "Moka Pot",
-    "sydney": "Sydney",
-    "japanese": "Japanese",
-    "uci-food": "UCI Food",
-    "digital-minimalism": "Digital Minimalism",
-}
-
-ENTITY_SLUGS = {
-    "sydney",
-    "japan",
-    "hong-kong",
-    "bali",
-    "arsenal",
-    "manchester-united",
-    "uci",
-}
-
-ASPIRATION_VERBS = {
-    "learn",
-    "visit",
-    "go",
-    "read",
-    "try",
-    "get",
-    "buy",
-    "run",
-    "build",
-    "make",
-    "do",
-    "write",
-    "take",
-    "start",
-    "stop",
-    "be",
-    "live",
-    "explore",
-    "improve",
-    "create",
-    "find",
-}
-
 TOPIC_EXTRACTION_MAX_BODY_CHARS = 4_000
 TOPIC_EXTRACTION_CONFIDENT_LEVELS = {"high", "medium"}
 PAGE_SPLIT_MAX_BODY_CHARS = 6_000
-PAGE_SHAPE_ATOMIC = "atomic"
-PAGE_SHAPE_TOPIC = "topic"
-INDEX_SECTION_ORDER = ("Concepts", "Entities", "Experiences", "Aspirations")
-CATALOG_PATH = "catalog.md"
-HIGH_SIGNAL_INBOUND_THRESHOLD = 3
 SOURCE_LINE_RE = re.compile(r"^- \[(?P<label>[^\]]+)\]\((?P<path>[^)]+)\)(?P<suffix>.*)$")
-CONNECTION_SLUG_RE = re.compile(r"\[\[(?P<slug>[^\]]+)\]\]")
 BOLD_HEADING_RE = re.compile(r"^[-*+]\s*\*\*(.+?)\*\*\s*$")
-BOILERPLATE_PATTERNS = (
-    re.compile(r"^This page collects Marcus's notes about .* across \d+ source(?:s)?\.$"),
-    re.compile(r"^- No notes yet\.$"),
-    re.compile(r"^- No sources linked yet\.$"),
-)
 GENERIC_BUCKET_SLUGS = {
     "recipe",
     "recipes",
@@ -180,55 +144,6 @@ LECTURE_HEADING_RE = re.compile(
     r"^(?:###\s+|[-*+]\s*\*\*)(week\s*\d+|lecture|lec\b|discussion|disc\b|lab\b|midterm|final|quiz|exam|homework|hw\b|assignment|chapter)",
     flags=re.I,
 )
-
-
-@dataclass
-class SourceRecord:
-    label: str
-    path: str
-    status: str
-    raw_content: str
-    cleaned_text: str
-    fetched_summary: str | None
-    detected_url: str | None
-    source_kind: str = "capture"
-    source_id: str | None = None
-    created_at: str | None = None
-    title: str | None = None
-    external_url: str | None = None
-    provenance_pointer: str | None = None
-    tags: set[str] = field(default_factory=set)
-    excluded_from_body: bool = False
-
-
-@dataclass
-class Page:
-    slug: str
-    title: str
-    page_type: str
-    summary_hint: str
-    shape: str = PAGE_SHAPE_ATOMIC
-    notes: list[str] = field(default_factory=list)
-    connections: Counter = field(default_factory=Counter)
-    sources: dict[str, SourceRecord] = field(default_factory=dict)
-    seed_kinds: set[str] = field(default_factory=set)
-    rendered_summary: str | None = None
-    rendered_notes_markdown: str | None = None
-    open_questions: list[str] = field(default_factory=list)
-    topic_parent: str | None = None
-
-
-@dataclass
-class ParsedWikiPage:
-    slug: str
-    title: str
-    page_type: str
-    shape: str
-    summary_lines: list[str] = field(default_factory=list)
-    note_lines: list[str] = field(default_factory=list)
-    open_question_lines: list[str] = field(default_factory=list)
-    connection_slugs: list[str] = field(default_factory=list)
-    sources: dict[str, SourceRecord] = field(default_factory=dict)
 
 
 @dataclass
@@ -360,33 +275,6 @@ def looks_like_archive(component: str) -> bool:
     return False
 
 
-def page_title(slug: str) -> str:
-    if slug in TITLE_ALIASES:
-        return TITLE_ALIASES[slug]
-    words = slug.split("-")
-    titled = []
-    for word in words:
-        if word in {"and", "of", "to", "for", "in"}:
-            titled.append(word)
-        elif word.isdigit():
-            titled.append(word)
-        else:
-            titled.append(word.capitalize())
-    return " ".join(titled)
-
-
-def classify_page(slug: str, original_title: str, seed_kind: str) -> str:
-    lowered = original_title.strip().lower()
-    if slug in ENTITY_SLUGS:
-        return "Entities"
-    first_word = slug.split("-", 1)[0]
-    if first_word in ASPIRATION_VERBS:
-        return "Aspirations"
-    if seed_kind in {"title", "model"} and re.search(r"\b(trip|birthday|anniversary|camping|dinner|date)\b", lowered):
-        return "Experiences"
-    return "Concepts"
-
-
 def clean_component(component: str) -> str | None:
     stripped = component.strip()
     if not stripped or looks_like_archive(stripped):
@@ -417,18 +305,6 @@ def derive_note_title(path: Path, content: str) -> str:
             return text or path.stem
         break
     return path.stem
-
-
-def strip_markdown(text: str) -> str:
-    text = re.sub(r"!\[\[([^\]]+)\]\]", r"embedded media: \1", text)
-    text = re.sub(r"\[\[(.*?)\]\]", r"\1", text)
-    text = re.sub(r"\[(.*?)\]\((.*?)\)", r"\1", text)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = text.replace("**", " ").replace("__", " ")
-    text = text.replace("*", " ").replace("_", " ")
-    text = re.sub(r"`+", "", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
 
 
 def note_has_url(content: str) -> bool:
@@ -679,18 +555,6 @@ def prepare_source_record(
     )
 
 
-def compact_source_text(source: SourceRecord, limit: int = 800) -> str:
-    body_parts = []
-    if source.fetched_summary:
-        body_parts.append(f"Fetched summary: {source.fetched_summary}")
-    if source.cleaned_text:
-        body_parts.append(source.cleaned_text)
-    combined = "\n\n".join(body_parts).strip()
-    if len(combined) <= limit:
-        return combined
-    return combined[: limit - 3].rstrip() + "..."
-
-
 def should_fold_note_into_parent(title: str, content: str, url: str | None) -> bool:
     if is_bare_url_note(content):
         return True
@@ -721,80 +585,68 @@ def derive_path_topics(path: Path) -> list[str]:
     return topics
 
 
-def ordered_unique(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for value in values:
-        normalized = value.strip()
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        ordered.append(normalized)
-    return ordered
-
-
 def parse_note_snippets(note_lines: list[str]) -> list[str]:
-    return parsing_impl.parse_note_snippets(_api(), note_lines)
+    return parsing_impl.parse_note_snippets(note_lines)
 
 
 def parse_source_line(line: str, retained_evidence: str = "") -> SourceRecord | None:
-    return parsing_impl.parse_source_line(_api(), line, retained_evidence)
+    return parsing_impl.parse_source_line(line, retained_evidence)
 
 
 def extract_connection_slugs(connection_lines: list[str]) -> list[str]:
-    return parsing_impl.extract_connection_slugs(_api(), connection_lines)
+    return parsing_impl.extract_connection_slugs(connection_lines)
 
 
 def page_shape(page: Page) -> str:
-    return rendering_impl.page_shape(_api(), page)
+    return rendering_impl.page_shape(page)
 
 
 def sorted_connection_slugs(page: Page, *, limit: int | None = None) -> list[str]:
-    return rendering_impl.sorted_connection_slugs(_api(), page, limit=limit)
+    return rendering_impl.sorted_connection_slugs(page, limit=limit)
 
 
 def render_connection_lines(page: Page, *, limit: int | None = 12) -> list[str]:
-    return rendering_impl.render_connection_lines(_api(), page, limit=limit)
+    return rendering_impl.render_connection_lines(page, limit=limit)
 
 
 def render_source_lines(page: Page) -> list[str]:
-    return rendering_impl.render_source_lines(_api(), page)
+    return rendering_impl.render_source_lines(page)
 
 
 def build_simple_notes_markdown(page: Page) -> str:
-    return rendering_impl.build_simple_notes_markdown(_api(), page)
+    return rendering_impl.build_simple_notes_markdown(page)
 
 
 def page_index_summary(page: Page) -> str:
-    return rendering_impl.page_index_summary(_api(), page)
+    return rendering_impl.page_index_summary(page)
 
 
 def inbound_link_counts(pages: dict[str, Page]) -> Counter:
-    return rendering_impl.inbound_link_counts(_api(), pages)
+    return rendering_impl.inbound_link_counts(pages)
 
 
 def render_catalog(pages: dict[str, Page]) -> str:
-    return rendering_impl.render_catalog(_api(), pages)
+    return rendering_impl.render_catalog(pages, today=TODAY)
 
 
 def parse_page_file(path: Path, page_type: str | None = None) -> ParsedWikiPage:
-    return parsing_impl.parse_page_file(_api(), path, page_type)
+    return parsing_impl.parse_page_file(path, page_type)
 
 
 def parsed_page_to_page(parsed: ParsedWikiPage) -> Page:
-    return parsing_impl.parsed_page_to_page(_api(), parsed)
+    return parsing_impl.parsed_page_to_page(parsed)
 
 
 def load_existing_page_types(index_path: Path) -> dict[str, str]:
-    return parsing_impl.load_existing_page_types(_api(), index_path)
+    return parsing_impl.load_existing_page_types(index_path)
 
 
 def load_page_types() -> dict[str, str]:
-    return parsing_impl.load_page_types(_api())
+    return parsing_impl.load_page_types(WIKI_ROOT)
 
 
 def load_existing_wiki_pages() -> dict[str, ParsedWikiPage]:
-    return parsing_impl.load_existing_wiki_pages(_api())
+    return parsing_impl.load_existing_wiki_pages(WIKI_ROOT)
 
 
 def merge_page_content(target: Page, source_page: Page) -> None:
@@ -1378,19 +1230,19 @@ def ensure_supporting_pages(pages: dict[str, Page], slug: str, original_title: s
 
 
 def normalize_page(page: Page) -> Page:
-    return rendering_impl.normalize_page(_api(), page)
+    return rendering_impl.normalize_page(page)
 
 
 def validate_page(page: Page, *, allow_missing_outbound: bool = False) -> list[str]:
-    return rendering_impl.validate_page(_api(), page, allow_missing_outbound=allow_missing_outbound)
+    return rendering_impl.validate_page(page, allow_missing_outbound=allow_missing_outbound)
 
 
 def render_page(page: Page) -> str:
-    return rendering_impl.render_page(_api(), page)
+    return rendering_impl.render_page(page)
 
 
 def render_index(pages: dict[str, Page]) -> str:
-    return rendering_impl.render_index(_api(), pages)
+    return rendering_impl.render_index(pages, today=TODAY)
 
 
 def split_report_manifest_payload(report: SplitPhaseReport) -> dict[str, object]:
