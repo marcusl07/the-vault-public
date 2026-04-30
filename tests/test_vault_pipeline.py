@@ -1114,9 +1114,38 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertEqual(second["skipped"], [{"capture_id": "123", "raw_path": "raw/note-123.md"}])
             self.assertEqual(len(handled), 1)
             events = [json.loads(line) for line in vp.STATE_EVENTS_PATH.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual([event["event"] for event in events], ["discovered", "processed", "discovered", "skipped"])
+            self.assertEqual([event["event"] for event in events], ["discovered", "processed", "skipped"])
             self.assertTrue(all(event["item_id"] == "capture:123" for event in events))
             self.assertTrue(all("content_hash" in event for event in events))
+
+    def test_ingest_raw_notes_repeated_runs_do_not_duplicate_discovered_events(self) -> None:
+        with isolated_env() as (_, raw_root, _, _):
+            raw_path = raw_root / "note-123.md"
+            raw_path.write_text(
+                vp.render_raw_file(
+                    capture_id="123",
+                    title="Note 1",
+                    created_at="2026-04-20T17:32:00Z",
+                    source_file="Note 1.md",
+                    body="Stable body.",
+                ),
+                encoding="utf-8",
+            )
+            handled: list[str] = []
+
+            def handler(capture_id: str, path: Path) -> None:
+                handled.append(capture_id)
+
+            for _ in range(3):
+                vp.ingest_raw_notes(
+                    [{"capture_id": "123", "raw_path": "raw/note-123.md"}],
+                    integration_handler=handler,
+                )
+
+            events = [json.loads(line) for line in vp.STATE_EVENTS_PATH.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([event["event"] for event in events], ["discovered", "processed", "skipped", "skipped"])
+            self.assertEqual([event["event"] for event in events].count("discovered"), 1)
+            self.assertEqual(handled, ["123"])
 
     def test_ingest_raw_notes_reprocesses_changed_content_from_state(self) -> None:
         with isolated_env() as (_, raw_root, _, _):
@@ -1160,8 +1189,8 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertEqual(len(handled), 2)
             self.assertIn("Changed body.", handled[-1])
             events = [json.loads(line) for line in vp.STATE_EVENTS_PATH.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual([event["event"] for event in events], ["discovered", "processed", "discovered", "updated", "processed"])
-            self.assertNotEqual(events[1]["content_hash"], events[3]["content_hash"])
+            self.assertEqual([event["event"] for event in events], ["discovered", "processed", "updated", "processed"])
+            self.assertNotEqual(events[1]["content_hash"], events[2]["content_hash"])
 
     def test_ingest_reuses_single_raw_source_across_grounded_split_children(self) -> None:
         with isolated_env() as (_, raw_root, wiki_root, _):

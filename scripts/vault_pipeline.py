@@ -415,6 +415,19 @@ def latest_state_record(item_id: str, state_path: Path | None = None) -> dict[st
     return latest
 
 
+def state_item_seen(item_id: str, state_path: Path | None = None) -> bool:
+    effective_state_path = state_path or STATE_EVENTS_PATH
+    if not effective_state_path.exists():
+        return False
+    for line in effective_state_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        payload = json.loads(line)
+        if payload.get("item_id") == item_id:
+            return True
+    return False
+
+
 def _latest_ingest_event(
     *,
     capture_id: str,

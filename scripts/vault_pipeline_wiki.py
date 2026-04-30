@@ -654,8 +654,9 @@ def ingest_raw_notes(
             "raw_path": state_item["raw_path"],
             "content_hash": state_item["content_hash"],
         }
-        api.append_state_event({"event": "discovered", **state_payload}, state_path=state_path)
         prior_state = api.latest_state_record(str(state_item["item_id"]), state_path=state_path)
+        if not api.state_item_seen(str(state_item["item_id"]), state_path=state_path):
+            api.append_state_event({"event": "discovered", **state_payload}, state_path=state_path)
         legacy_integrated = (
             api._latest_ingest_event(capture_id=item["capture_id"], raw_path=item["raw_path"], log_path=log_path)
             == "integrated"
