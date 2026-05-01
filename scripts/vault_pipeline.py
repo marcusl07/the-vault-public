@@ -1,15 +1,10 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-import errno
-import fcntl
-import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import re
 import sys
 from typing import Callable, Iterator, TextIO, TypedDict
@@ -21,6 +16,7 @@ try:
     from scripts import vault_pipeline_capture as capture_impl
     from scripts import vault_pipeline_cli as cli_impl
     from scripts import vault_pipeline_lint as lint_impl
+    from scripts import vault_pipeline_notes as notes_impl
     from scripts import vault_pipeline_query as query_impl
     from scripts import wiki_search as search_impl
     from scripts import vault_pipeline_wiki as wiki_impl
@@ -31,6 +27,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution path
     import vault_pipeline_capture as capture_impl
     import vault_pipeline_cli as cli_impl
     import vault_pipeline_lint as lint_impl
+    import vault_pipeline_notes as notes_impl
     import vault_pipeline_query as query_impl
     import wiki_search as search_impl
     import vault_pipeline_wiki as wiki_impl
@@ -212,46 +209,15 @@ class HeavyUpdateProposal:
     reason: str = ""
 
 
-@dataclass(frozen=True)
-class SourceNote:
-    path: Path
-    filename: str
-    frontmatter: dict[str, object]
-    body: str
-
-    @property
-    def capture_id(self) -> str | None:
-        value = self.frontmatter.get("capture_id")
-        return value if isinstance(value, str) and value else None
-
-    @property
-    def ingest_attempts(self) -> int:
-        value = self.frontmatter.get("ingest_attempts", 0)
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return 0
+SourceNote = notes_impl.SourceNote
 
 
 def utc_timestamp(value: float | None = None) -> str:
-    if value is None:
-        dt = datetime.now(UTC)
-    else:
-        dt = datetime.fromtimestamp(value, tz=UTC)
-    return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return notes_impl.utc_timestamp(value)
 
 
 def normalize_repo_path(path: str | Path) -> str:
-    candidate = Path(path)
-    if not candidate.is_absolute():
-        candidate = ROOT / candidate
-
-    root_abs = Path(os.path.abspath(ROOT))
-    candidate_abs = Path(os.path.abspath(candidate))
-    if Path(os.path.commonpath([root_abs, candidate_abs])) != root_abs:
-        raise ValueError(f"path must stay within repo root: {path}")
-    relative = Path(os.path.relpath(candidate_abs, root_abs))
-    return PurePosixPath(relative.as_posix()).as_posix()
+    return notes_impl.normalize_repo_path(ROOT, path)
 
 
 def clean_title_from_filename(filename: str) -> str:
@@ -276,7 +242,7 @@ def raw_file_slug(title: str) -> str:
 
 
 def stable_source_id(source_kind: str, identity: str) -> str:
-    return f"{source_kind}:{identity}"
+    return notes_impl.stable_source_id(source_kind, identity)
 
 
 def debug_print(message: str, *, enabled: bool, stream: TextIO | None = None) -> None:
@@ -289,97 +255,39 @@ def atomic_write_text(path: Path, content: str) -> None:
 
 
 def _parse_scalar(value: str) -> object:
-    stripped = value.strip()
-    if not stripped:
-        return ""
-    if stripped.startswith("'") and stripped.endswith("'"):
-        return stripped[1:-1].replace("''", "'")
-    if stripped.startswith('"') and stripped.endswith('"'):
-        return stripped[1:-1].replace('\\"', '"')
-    if re.fullmatch(r"-?\d+", stripped):
-        return int(stripped)
-    return stripped
+    return notes_impl._parse_scalar(value)
 
 
 def _render_scalar(value: object) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, int):
-        return str(value)
-    text = str(value).replace("'", "''")
-    return f"'{text}'"
+    return notes_impl._render_scalar(value)
 
 
 def split_frontmatter(text: str) -> tuple[dict[str, object], str, bool]:
-    if not text.startswith("---\n"):
-        return {}, text, False
-
-    lines = text.splitlines(keepends=True)
-    frontmatter_lines: list[str] = []
-    for index in range(1, len(lines)):
-        if lines[index].strip() == "---":
-            frontmatter: dict[str, object] = {}
-            for raw_line in frontmatter_lines:
-                stripped = raw_line.strip()
-                if not stripped:
-                    continue
-                if ":" not in raw_line:
-                    raise ValueError("unparseable frontmatter line")
-                key, raw_value = raw_line.split(":", 1)
-                frontmatter[key.strip()] = _parse_scalar(raw_value)
-            body = "".join(lines[index + 1 :])
-            return frontmatter, body, True
-        frontmatter_lines.append(lines[index])
-    raise ValueError("unparseable frontmatter")
+    return notes_impl.split_frontmatter(text)
 
 
 def render_note(frontmatter: dict[str, object], body: str, *, key_order: list[str] | None = None) -> str:
-    if not frontmatter:
-        return body
-    ordered_keys = key_order or list(frontmatter.keys())
-    seen: set[str] = set()
-    lines = ["---"]
-    for key in ordered_keys:
-        if key in frontmatter:
-            lines.append(f"{key}: {_render_scalar(frontmatter[key])}")
-            seen.add(key)
-    for key, value in frontmatter.items():
-        if key not in seen:
-            lines.append(f"{key}: {_render_scalar(value)}")
-    lines.append("---")
-    return "\n".join(lines) + "\n" + body
+    return notes_impl.render_note(frontmatter, body, key_order=key_order)
 
 
 def read_source_note(path: Path) -> SourceNote:
-    text = path.read_text(encoding="utf-8")
-    frontmatter, body, _ = split_frontmatter(text)
-    return SourceNote(path=path, filename=path.name, frontmatter=frontmatter, body=body)
+    return notes_impl.read_source_note(path)
 
 
 def source_note_body_is_blank(note: SourceNote) -> bool:
-    return note.body.strip() == ""
+    return notes_impl.source_note_body_is_blank(note)
 
 
 def write_source_note(path: Path, frontmatter: dict[str, object], body: str) -> None:
-    key_order = ["capture_id", "created_at", "ingest_attempts"]
-    atomic_write_text(path, render_note(frontmatter, body, key_order=key_order))
+    notes_impl.write_source_note(path, frontmatter, body, writer=atomic_write_text)
 
 
 def append_jsonl_event(payload: dict[str, object], log_path: Path | None = None) -> None:
-    effective_log_path = log_path or JSONL_LOG_PATH
-    effective_log_path.parent.mkdir(parents=True, exist_ok=True)
-    with effective_log_path.open("a", encoding="utf-8", newline="") as handle:
-        handle.write(json.dumps({"ts": utc_timestamp(), **payload}, ensure_ascii=False, separators=(",", ":")) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    notes_impl.append_jsonl_event(payload, log_path or JSONL_LOG_PATH, timestamp=utc_timestamp, fsync=os.fsync)
 
 
 def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return notes_impl.sha256_file(path)
 
 
 def append_state_event(payload: dict[str, object], state_path: Path | None = None) -> None:
@@ -387,47 +295,15 @@ def append_state_event(payload: dict[str, object], state_path: Path | None = Non
 
 
 def raw_state_item(raw_path: Path, frontmatter: dict[str, object]) -> dict[str, object]:
-    source_id = frontmatter.get("source_id")
-    if not isinstance(source_id, str) or not source_id:
-        capture_id = frontmatter.get("capture_id")
-        if isinstance(capture_id, str) and capture_id:
-            source_id = stable_source_id("capture", capture_id)
-    content_hash = sha256_file(raw_path)
-    return {
-        "item_id": source_id if source_id else f"sha256:{content_hash}",
-        "source_id": source_id,
-        "raw_path": normalize_repo_path(raw_path),
-        "content_hash": content_hash,
-    }
+    return notes_impl.raw_state_item(ROOT, raw_path, frontmatter)
 
 
 def latest_state_record(item_id: str, state_path: Path | None = None) -> dict[str, object] | None:
-    effective_state_path = state_path or STATE_EVENTS_PATH
-    if not effective_state_path.exists():
-        return None
-    latest: dict[str, object] | None = None
-    for line in effective_state_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        payload = json.loads(line)
-        if payload.get("item_id") != item_id:
-            continue
-        if payload.get("event") in {"processed", "skipped", "updated", "failed"}:
-            latest = payload
-    return latest
+    return notes_impl.latest_state_record(item_id, state_path or STATE_EVENTS_PATH)
 
 
 def state_item_seen(item_id: str, state_path: Path | None = None) -> bool:
-    effective_state_path = state_path or STATE_EVENTS_PATH
-    if not effective_state_path.exists():
-        return False
-    for line in effective_state_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        payload = json.loads(line)
-        if payload.get("item_id") == item_id:
-            return True
-    return False
+    return notes_impl.state_item_seen(item_id, state_path or STATE_EVENTS_PATH)
 
 
 def _latest_ingest_event(
@@ -436,37 +312,11 @@ def _latest_ingest_event(
     raw_path: str,
     log_path: Path | None = None,
 ) -> str | None:
-    effective_log_path = log_path or JSONL_LOG_PATH
-    if not effective_log_path.exists():
-        return None
-    latest_event: str | None = None
-    for line in effective_log_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        payload = json.loads(line)
-        if payload.get("capture_id") != capture_id or payload.get("raw_path") != raw_path:
-            continue
-        event = payload.get("event")
-        if event in {"integrated", "integrate_failed"}:
-            latest_event = str(event)
-    return latest_event
+    return notes_impl.latest_ingest_event(capture_id=capture_id, raw_path=raw_path, log_path=log_path or JSONL_LOG_PATH)
 
 
 def _has_logged_event(event: str, *, capture_id: str | None, filename: str | None, log_path: Path) -> bool:
-    if not log_path.exists():
-        return False
-    for line in log_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        payload = json.loads(line)
-        if payload.get("event") != event:
-            continue
-        if capture_id is not None and payload.get("capture_id") != capture_id:
-            continue
-        if filename is not None and payload.get("filename") != filename:
-            continue
-        return True
-    return False
+    return notes_impl.has_logged_event(event, capture_id=capture_id, filename=filename, log_path=log_path)
 
 
 def discover_capture_candidates(capture_root: Path) -> list[Path]:
