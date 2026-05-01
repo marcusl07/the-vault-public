@@ -29,14 +29,14 @@ def validate_ingest_inputs(api: ModuleType, items: list[dict[str, object]]) -> l
         raw_abspath = api.ROOT / normalized["raw_path"]
         if not raw_abspath.exists():
             raise ValueError(f"raw note does not exist for capture_id {normalized['capture_id']}: {normalized['raw_path']}")
-        frontmatter, _ = api.parse_raw_note(raw_abspath)
-        if frontmatter.get("capture_id") != normalized["capture_id"]:
+        artifact = api.read_source_artifact(raw_abspath)
+        if artifact.frontmatter.get("capture_id") != normalized["capture_id"]:
             raise ValueError(
                 f"raw note frontmatter capture_id mismatch for capture_id {normalized['capture_id']}: {normalized['raw_path']}"
             )
-        if frontmatter.get("source_kind") != "capture":
+        if artifact.source_kind != "capture":
             raise ValueError(f"raw note missing capture source_kind for capture_id {normalized['capture_id']}: {normalized['raw_path']}")
-        if frontmatter.get("source_id") != api.stable_source_id("capture", normalized["capture_id"]):
+        if artifact.source_id != api.stable_source_id("capture", normalized["capture_id"]):
             raise ValueError(f"raw note source_id mismatch for capture_id {normalized['capture_id']}: {normalized['raw_path']}")
         validated.append(normalized)
     return validated
@@ -47,13 +47,10 @@ def _today_date(api: ModuleType) -> str:
 
 
 def _read_raw_note(api: ModuleType, path: Path) -> tuple[dict[str, object], str, str]:
-    frontmatter, body = api.parse_raw_note(path)
-    title = frontmatter.get("title")
-    if not isinstance(title, str) or not title:
+    artifact = api.read_source_artifact(path)
+    if not artifact.title:
         raise ValueError(f"raw note missing title frontmatter: {path}")
-    synthetic_heading = f"# {title}\n\n"
-    content_body = body[len(synthetic_heading) :] if body.startswith(synthetic_heading) else body
-    return frontmatter, title, content_body
+    return artifact.frontmatter, artifact.title, api.bw.content_body(artifact)
 
 
 def _derive_path_topics(api: ModuleType, path: Path) -> list[str]:
@@ -114,33 +111,19 @@ def _source_record_from_artifact(
     body: str,
     source_path: Path,
 ) -> object:
-    url = frontmatter.get("external_url")
-    if not isinstance(url, str) or not url:
-        url = api.bw.extract_first_url(body)
-    fetched_summary = None
-    source_status = "local_only"
-    if url:
-        if api.bw.is_google_search_url(url):
-            source_status = "fetch_skipped"
-        else:
-            fetch_result = api.bw.fetch_url_summary(url)
-            fetched_summary = fetch_result.summary
-            source_status = fetch_result.status
-    return api.bw.prepare_source_record(
-        source_label=title,
-        source_path="../" + api.normalize_repo_path(source_path),
-        source_status=source_status,
-        raw_content=body,
-        fetched_summary=fetched_summary,
-        detected_url=url,
-        source_kind=str(frontmatter.get("source_kind", "capture")),
-        source_id=str(frontmatter["source_id"]) if frontmatter.get("source_id") is not None else None,
-        created_at=str(frontmatter["created_at"]) if frontmatter.get("created_at") is not None else None,
-        title=str(frontmatter.get("title", title)),
-        external_url=url,
-        provenance_pointer=(
-            str(frontmatter["provenance_pointer"]) if frontmatter.get("provenance_pointer") is not None else None
-        ),
+    artifact = api.read_source_artifact(source_path)
+    return api.source_artifact_to_evidence(artifact)
+
+
+def source_artifact_to_evidence(api: ModuleType, artifact: object) -> object:
+    return api.bw.source_artifact_to_evidence(
+        artifact,
+        fetcher=api.bw.fetch_url_summary,
+        extract_first_url=api.bw.extract_first_url,
+        is_google_search_url=api.bw.is_google_search_url,
+        clean_source_text=api.bw.clean_source_text,
+        detect_source_tags=api.bw.detect_source_tags,
+        should_exclude_from_body=api.bw.should_exclude_from_body,
     )
 
 
@@ -650,17 +633,17 @@ def ingest_raw_notes(
                 raw_abspath = api.ROOT / item["raw_path"]
                 if not raw_abspath.exists():
                     raise ValueError(f"raw note does not exist for capture_id {item['capture_id']}: {item['raw_path']}")
-                frontmatter, _ = api.parse_raw_note(raw_abspath)
-                if frontmatter.get("capture_id") != item["capture_id"]:
+                artifact = api.read_source_artifact(raw_abspath)
+                if artifact.frontmatter.get("capture_id") != item["capture_id"]:
                     raise ValueError(
                         f"raw note frontmatter capture_id mismatch for capture_id {item['capture_id']}: {item['raw_path']}"
                     )
-                if frontmatter.get("source_kind") != "capture":
+                if artifact.source_kind != "capture":
                     raise ValueError(f"raw note missing capture source_kind for capture_id {item['capture_id']}: {item['raw_path']}")
-                if frontmatter.get("source_id") != api.stable_source_id("capture", item["capture_id"]):
+                if artifact.source_id != api.stable_source_id("capture", item["capture_id"]):
                     raise ValueError(f"raw note source_id mismatch for capture_id {item['capture_id']}: {item['raw_path']}")
 
-                state_item = api.raw_state_item(raw_abspath, frontmatter)
+                state_item = api.raw_state_item(artifact)
                 state_payload = {
                     "item_id": state_item["item_id"],
                     "source_id": state_item["source_id"],
@@ -707,8 +690,8 @@ def ingest_raw_notes(
 
     for item in validated:
         raw_abspath = api.ROOT / item["raw_path"]
-        frontmatter, _ = api.parse_raw_note(raw_abspath)
-        state_item = api.raw_state_item(raw_abspath, frontmatter)
+        artifact = api.read_source_artifact(raw_abspath)
+        state_item = api.raw_state_item(artifact)
         state_payload = {
             "item_id": state_item["item_id"],
             "source_id": state_item["source_id"],

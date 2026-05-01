@@ -108,6 +108,82 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertEqual(frontmatter["provenance_pointer"], "chat:2026-04-23T10:00:00Z")
             self.assertIn("# Favorite Coffee", body)
 
+    def test_read_capture_source_artifact_exposes_domain_metadata(self) -> None:
+        with isolated_env() as (root, raw_root, _, _):
+            raw_path = raw_root / "coffee.md"
+            raw_path.write_text(
+                vp.render_note(
+                    {
+                        "capture_id": "abc",
+                        "source_kind": "capture",
+                        "source_id": "capture:abc",
+                        "title": "Coffee",
+                        "created_at": "2026-04-23T10:00:00Z",
+                    },
+                    "# Coffee\n\nDial in the grinder.",
+                ),
+                encoding="utf-8",
+            )
+
+            artifact = vp.read_source_artifact(raw_path)
+
+            self.assertEqual(artifact.path, raw_path)
+            self.assertEqual(artifact.repo_path, "raw/coffee.md")
+            self.assertEqual(artifact.source_kind, "capture")
+            self.assertEqual(artifact.source_id, "capture:abc")
+            self.assertEqual(artifact.title, "Coffee")
+            self.assertEqual(artifact.body, "# Coffee\n\nDial in the grinder.")
+            self.assertEqual(root / artifact.repo_path, raw_path)
+
+    def test_read_chat_source_artifact_preserves_query_frontmatter(self) -> None:
+        with isolated_env():
+            path = vp.persist_chat_source_artifact(
+                title="Favorite Coffee",
+                body="Marcus prefers pourover over espresso at home.",
+                created_at="2026-04-23T10:00:00Z",
+                conversation_ref="chat:2026-04-23T10:00:00Z",
+                extra_frontmatter={
+                    "target_page": "favorite-coffee",
+                    "fact_key": "coffee.preference",
+                    "replacement_intent": True,
+                },
+            )
+
+            artifact = vp.read_source_artifact(path)
+
+            self.assertEqual(artifact.source_kind, "chat")
+            self.assertEqual(artifact.provenance_pointer, "chat:2026-04-23T10:00:00Z")
+            self.assertEqual(artifact.frontmatter["target_page"], "favorite-coffee")
+            self.assertEqual(artifact.frontmatter["fact_key"], "coffee.preference")
+            self.assertEqual(artifact.frontmatter["replacement_intent"], "true")
+
+    def test_source_artifact_to_evidence_uses_external_url_as_citation_label(self) -> None:
+        with isolated_env() as (_, raw_root, _, _):
+            raw_path = raw_root / "article.md"
+            raw_path.write_text(
+                vp.render_note(
+                    {
+                        "capture_id": "abc",
+                        "source_kind": "capture",
+                        "source_id": "capture:abc",
+                        "title": "Saved Article",
+                        "created_at": "2026-04-23T10:00:00Z",
+                        "external_url": "https://example.com/article",
+                    },
+                    "# Saved Article\n\nA useful article.",
+                ),
+                encoding="utf-8",
+            )
+            artifact = vp.read_source_artifact(raw_path)
+            with mock.patch.object(vp.bw, "fetch_url_summary", return_value=vp.bw.FetchResult("Fetched text.", "fetched")):
+                evidence = vp.source_artifact_to_evidence(artifact)
+
+            self.assertEqual(evidence.label, "https://example.com/article")
+            self.assertEqual(evidence.path, "../raw/article.md")
+            self.assertEqual(evidence.external_url, "https://example.com/article")
+            self.assertEqual(evidence.source_kind, "capture")
+            self.assertEqual(evidence.title, "Saved Article")
+
     def test_wiki_search_ranks_keyword_matches_by_relevance(self) -> None:
         with isolated_env() as (_, _, wiki_root, _):
             (wiki_root / "espresso-at-home.md").write_text(

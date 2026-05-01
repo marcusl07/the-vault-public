@@ -13,7 +13,7 @@ try:
         PAGE_SHAPE_TOPIC,
         Page,
         ParsedWikiPage,
-        SourceRecord,
+        SourceEvidence,
         classify_page,
         page_title,
         strip_markdown,
@@ -28,7 +28,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution path
         PAGE_SHAPE_TOPIC,
         Page,
         ParsedWikiPage,
-        SourceRecord,
+        SourceEvidence,
         classify_page,
         page_title,
         strip_markdown,
@@ -72,7 +72,7 @@ def parse_markdown_source_link(line: str) -> tuple[str, str, str] | None:
     return label, rest[:end_index], rest[end_index + 1 :]
 
 
-def parse_source_line(line: str, retained_evidence: str = "") -> SourceRecord | None:
+def parse_source_line(line: str, retained_evidence: str = "") -> SourceEvidence | None:
     parsed_link = parse_markdown_source_link(line)
     if parsed_link is None:
         return None
@@ -85,11 +85,10 @@ def parse_source_line(line: str, retained_evidence: str = "") -> SourceRecord | 
         status = "non_html"
     elif suffix == "— [⚠️ dead link]":
         status = "http_dead"
-    return SourceRecord(
+    return SourceEvidence(
         label=label,
         path=path,
         status=status,
-        raw_content="",
         cleaned_text=retained_evidence,
         fetched_summary=None,
         detected_url=label if label.startswith(("http://", "https://")) else None,
@@ -140,7 +139,7 @@ def parse_page_file(path: Path, page_type: str | None = None) -> ParsedWikiPage:
         sections[current].append(line)
 
     retained_evidence = "\n".join(parse_note_snippets([line for line in sections["notes"] if line.strip()]))
-    sources: dict[str, SourceRecord] = {}
+    sources: dict[str, SourceEvidence] = {}
     for line in sections["sources"]:
         source = parse_source_line(line, retained_evidence)
         if source is not None:

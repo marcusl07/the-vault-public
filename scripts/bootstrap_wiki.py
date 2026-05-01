@@ -19,6 +19,7 @@ import unicodedata
 try:
     from scripts.workspace_fs import atomic_write_text as shared_atomic_write_text
     from scripts.workspace_fs import temporary_workspace as shared_temporary_workspace
+    from scripts.source_model import content_body, source_artifact_to_evidence
     from scripts import bootstrap_wiki_cache as cache_impl
     from scripts import bootstrap_wiki_cli as cli_impl
     from scripts.bootstrap_wiki_model import (
@@ -31,6 +32,9 @@ try:
         TODAY,
         Page,
         ParsedWikiPage,
+        SourceArtifact,
+        SourceCitation,
+        SourceEvidence,
         SourceRecord,
         classify_page,
         compact_source_text,
@@ -45,6 +49,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - direct script execution path
     from workspace_fs import atomic_write_text as shared_atomic_write_text
     from workspace_fs import temporary_workspace as shared_temporary_workspace
+    from source_model import content_body, source_artifact_to_evidence
     import bootstrap_wiki_cache as cache_impl
     import bootstrap_wiki_cli as cli_impl
     from bootstrap_wiki_model import (
@@ -57,6 +62,9 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution path
         TODAY,
         Page,
         ParsedWikiPage,
+        SourceArtifact,
+        SourceCitation,
+        SourceEvidence,
         SourceRecord,
         classify_page,
         compact_source_text,
@@ -533,14 +541,13 @@ def prepare_source_record(
     title: str | None = None,
     external_url: str | None = None,
     provenance_pointer: str | None = None,
-) -> SourceRecord:
+) -> SourceEvidence:
     cleaned_text = clean_source_text(raw_content, source_label)
     tags = detect_source_tags(source_label, cleaned_text, detected_url, fetched_summary)
-    return SourceRecord(
+    return SourceEvidence(
         label=source_label,
         path=source_path,
         status=source_status,
-        raw_content=raw_content,
         cleaned_text=cleaned_text,
         fetched_summary=fetched_summary,
         detected_url=detected_url,
@@ -1203,11 +1210,10 @@ def add_page_note(
         page.notes.append(note_text)
     existing_source = page.sources.get(source_path)
     if existing_source is None:
-        page.sources[source_path] = SourceRecord(
+        page.sources[source_path] = SourceEvidence(
             label=source_label,
             path=source_path,
             status=source_status,
-            raw_content="",
             cleaned_text=note_text,
             fetched_summary=None,
             detected_url=None,

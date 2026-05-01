@@ -177,6 +177,7 @@ class LintReport:
 
 
 SourceNote = notes_impl.SourceNote
+SourceArtifact = sources_impl.SourceArtifact
 MaintenanceBudget = maintenance_impl.MaintenanceBudget
 HeavyPageDelta = maintenance_impl.HeavyPageDelta
 HeavyNewPageProposal = maintenance_impl.HeavyNewPageProposal
@@ -256,7 +257,7 @@ def append_state_event(payload: dict[str, object], state_path: Path | None = Non
     append_jsonl_event(payload, log_path=state_path or STATE_EVENTS_PATH)
 
 
-def raw_state_item(raw_path: Path, frontmatter: dict[str, object]) -> dict[str, object]:
+def raw_state_item(raw_path: Path | SourceArtifact, frontmatter: dict[str, object] | None = None) -> dict[str, object]:
     return notes_impl.raw_state_item(ROOT, raw_path, frontmatter)
 
 
@@ -317,6 +318,10 @@ def render_raw_file(
 
 def parse_raw_note(path: Path) -> tuple[dict[str, object], str]:
     return sources_impl.parse_raw_note(sys.modules[__name__], path)
+
+
+def read_source_artifact(path: Path) -> SourceArtifact:
+    return sources_impl.read_source_artifact(sys.modules[__name__], path)
 
 
 def persist_chat_source_artifact(
@@ -562,6 +567,10 @@ def _content_owner_slug(assignments: list[tuple[str, str, str | None]]) -> str |
 
 def _source_record_from_artifact(frontmatter: dict[str, object], title: str, body: str, source_path: Path) -> bw.SourceRecord:
     return wiki_impl._source_record_from_artifact(sys.modules[__name__], frontmatter, title, body, source_path)
+
+
+def source_artifact_to_evidence(artifact: SourceArtifact) -> bw.SourceEvidence:
+    return wiki_impl.source_artifact_to_evidence(sys.modules[__name__], artifact)
 
 
 def _resolve_synthesis_config() -> tuple[str | None, str]:

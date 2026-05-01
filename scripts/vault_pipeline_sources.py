@@ -6,6 +6,11 @@ from typing import TYPE_CHECKING
 import unicodedata
 import uuid
 
+try:
+    from scripts.source_model import SourceArtifact, read_source_artifact as read_source_artifact_model
+except ModuleNotFoundError:  # pragma: no cover - direct script execution path
+    from source_model import SourceArtifact, read_source_artifact as read_source_artifact_model
+
 if TYPE_CHECKING:
     from types import ModuleType
 
@@ -82,13 +87,16 @@ def render_raw_file(
 
 
 def parse_raw_note(api: ModuleType, path: Path) -> tuple[dict[str, object], str]:
-    text = path.read_text(encoding="utf-8")
-    frontmatter, body, has_frontmatter = api.split_frontmatter(text)
-    if not has_frontmatter:
-        raise ValueError("raw file missing frontmatter")
-    if not body.strip():
-        raise ValueError("raw file body is empty")
-    return frontmatter, body
+    artifact = read_source_artifact(api, path)
+    return artifact.frontmatter, artifact.body
+
+
+def read_source_artifact(api: ModuleType, path: Path) -> SourceArtifact:
+    return read_source_artifact_model(
+        path,
+        split_frontmatter=api.split_frontmatter,
+        normalize_repo_path=api.normalize_repo_path,
+    )
 
 
 def persist_chat_source_artifact(

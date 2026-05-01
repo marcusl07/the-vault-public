@@ -14,7 +14,6 @@ try:
         PAGE_SHAPE_TOPIC,
         TODAY,
         Page,
-        SourceRecord,
         compact_source_text,
         ordered_unique,
     )
@@ -28,7 +27,6 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution path
         PAGE_SHAPE_TOPIC,
         TODAY,
         Page,
-        SourceRecord,
         compact_source_text,
         ordered_unique,
     )

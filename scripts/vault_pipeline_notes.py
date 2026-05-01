@@ -161,7 +161,15 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def raw_state_item(root: Path, raw_path: Path, frontmatter: dict[str, object]) -> dict[str, object]:
+def raw_state_item(root: Path, raw_path: Path | object, frontmatter: dict[str, object] | None = None) -> dict[str, object]:
+    artifact = raw_path if hasattr(raw_path, "path") and hasattr(raw_path, "frontmatter") else None
+    if artifact is not None:
+        raw_path = artifact.path
+        frontmatter = artifact.frontmatter
+    if not isinstance(raw_path, Path):
+        raw_path = Path(raw_path)
+    if frontmatter is None:
+        frontmatter = {}
     source_id = frontmatter.get("source_id")
     if not isinstance(source_id, str) or not source_id:
         capture_id = frontmatter.get("capture_id")

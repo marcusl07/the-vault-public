@@ -13,8 +13,8 @@ if TYPE_CHECKING:
 def _resolve_repo_relative_path(api: ModuleType, path: str) -> Path:
     normalized = path[3:] if path.startswith("../") else path
     normalized = unquote(normalized)
-    resolved = (api.ROOT / normalized).resolve()
-    root_resolved = api.ROOT.resolve()
+    resolved = Path(os.path.abspath(api.ROOT / normalized))
+    root_resolved = Path(os.path.abspath(api.ROOT))
     if Path(os.path.commonpath([root_resolved, resolved])) != root_resolved:
         raise ValueError(f"path must stay within repo root: {path}")
     return resolved
@@ -117,7 +117,7 @@ def _matching_chat_sources_for_fact(api: ModuleType, page: object, *, fact_key: 
         if source.source_kind != "chat":
             continue
         try:
-            artifact_frontmatter, _ = api.parse_raw_note(api._resolve_repo_relative_path(source_path))
+            artifact_frontmatter = api.read_source_artifact(api._resolve_repo_relative_path(source_path)).frontmatter
         except Exception:
             continue
         if artifact_frontmatter.get("fact_key") != fact_key:
@@ -160,8 +160,7 @@ def query_writeback_chat_fact(
             "replacement_intent": replacement_intent,
         },
     )
-    frontmatter, body = api.parse_raw_note(source_path)
-    source_record = api._source_record_from_artifact(frontmatter, page_title, body, source_path)
+    source_record = api.source_artifact_to_evidence(api.read_source_artifact(source_path))
     router_decision = api._route_source_update(
         title=page_title,
         body=normalized_note,

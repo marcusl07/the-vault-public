@@ -5,6 +5,11 @@ from dataclasses import dataclass, field
 from datetime import date
 import re
 
+try:
+    from scripts.source_model import SourceArtifact, SourceCitation, SourceEvidence
+except ModuleNotFoundError:  # pragma: no cover - direct script execution path
+    from source_model import SourceArtifact, SourceCitation, SourceEvidence
+
 
 PAGE_SHAPE_ATOMIC = "atomic"
 PAGE_SHAPE_TOPIC = "topic"
@@ -76,23 +81,7 @@ ASPIRATION_VERBS = {
 }
 
 
-@dataclass
-class SourceRecord:
-    label: str
-    path: str
-    status: str
-    raw_content: str
-    cleaned_text: str
-    fetched_summary: str | None
-    detected_url: str | None
-    source_kind: str = "capture"
-    source_id: str | None = None
-    created_at: str | None = None
-    title: str | None = None
-    external_url: str | None = None
-    provenance_pointer: str | None = None
-    tags: set[str] = field(default_factory=set)
-    excluded_from_body: bool = False
+SourceRecord = SourceEvidence
 
 
 @dataclass
@@ -104,7 +93,7 @@ class Page:
     shape: str = PAGE_SHAPE_ATOMIC
     notes: list[str] = field(default_factory=list)
     connections: Counter = field(default_factory=Counter)
-    sources: dict[str, SourceRecord] = field(default_factory=dict)
+    sources: dict[str, SourceEvidence] = field(default_factory=dict)
     seed_kinds: set[str] = field(default_factory=set)
     rendered_summary: str | None = None
     rendered_notes_markdown: str | None = None
@@ -122,7 +111,7 @@ class ParsedWikiPage:
     note_lines: list[str] = field(default_factory=list)
     open_question_lines: list[str] = field(default_factory=list)
     connection_slugs: list[str] = field(default_factory=list)
-    sources: dict[str, SourceRecord] = field(default_factory=dict)
+    sources: dict[str, SourceEvidence] = field(default_factory=dict)
 
 
 def page_title(slug: str) -> str:
@@ -164,7 +153,7 @@ def strip_markdown(text: str) -> str:
     return text.strip()
 
 
-def compact_source_text(source: SourceRecord, limit: int = 800) -> str:
+def compact_source_text(source: SourceEvidence, limit: int = 800) -> str:
     body_parts = []
     if source.fetched_summary:
         body_parts.append(f"Fetched summary: {source.fetched_summary}")
