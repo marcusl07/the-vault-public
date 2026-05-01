@@ -108,6 +108,90 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertEqual(frontmatter["provenance_pointer"], "chat:2026-04-23T10:00:00Z")
             self.assertIn("# Favorite Coffee", body)
 
+    def test_wiki_search_ranks_keyword_matches_by_relevance(self) -> None:
+        with isolated_env() as (_, _, wiki_root, _):
+            (wiki_root / "espresso-at-home.md").write_text(
+                "\n".join(
+                    [
+                        "# Espresso At Home",
+                        "",
+                        "## Notes",
+                        "",
+                        "- Marcus dials in espresso with a hand grinder and tracks extraction time.",
+                        "",
+                        "## Connections",
+                        "",
+                        "- [[coffee-preferences]]",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (wiki_root / "office-coffee.md").write_text(
+                "\n".join(
+                    [
+                        "# Office Coffee",
+                        "",
+                        "## Notes",
+                        "",
+                        "- The office has coffee available near the kitchen.",
+                        "",
+                        "## Connections",
+                        "",
+                        "- [[work-routines]]",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (wiki_root / "running-routes.md").write_text(
+                "# Running Routes\n\n## Notes\n\n- Hill repeats are useful training.\n\n## Connections\n\n- [[fitness]]\n",
+                encoding="utf-8",
+            )
+
+            results = vp.search_wiki("espresso grinder extraction", top_k=3)
+
+            self.assertGreaterEqual(len(results), 1)
+            self.assertEqual(results[0].slug, "espresso-at-home")
+            self.assertIn("espresso", results[0].matched_terms)
+            self.assertIn("grinder", results[0].matched_terms)
+            self.assertIn("extraction", results[0].snippet.lower())
+
+    def test_wiki_search_respects_top_k_and_skips_navigation_pages(self) -> None:
+        with isolated_env() as (_, _, wiki_root, _):
+            (wiki_root / "index.md").write_text("# Index\n\n- [[secret-index-only]] - apple banana\n", encoding="utf-8")
+            (wiki_root / "alpha.md").write_text(
+                "# Alpha\n\n## Notes\n\n- Apple planning notes for focused retrieval.\n\n## Connections\n\n- [[beta]]\n",
+                encoding="utf-8",
+            )
+            (wiki_root / "beta.md").write_text(
+                "# Beta\n\n## Notes\n\n- Apple banana notes with another retrieval clue.\n\n## Connections\n\n- [[alpha]]\n",
+                encoding="utf-8",
+            )
+
+            index = vp.build_wiki_search_index()
+            results = vp.search_wiki("apple retrieval", top_k=1, index=index)
+
+            self.assertEqual(len(results), 1)
+            self.assertNotEqual(results[0].slug, "index")
+            self.assertTrue(results[0].path.endswith(f"wiki/{results[0].slug}.md"))
+
+    def test_wiki_search_cli_outputs_json(self) -> None:
+        with isolated_env() as (_, _, wiki_root, _):
+            (wiki_root / "home-cooking.md").write_text(
+                "# Home Cooking\n\n## Notes\n\n- Batch cooking lentils helps weekday meals.\n\n## Connections\n\n- [[routines]]\n",
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = vp.search_main(["batch", "lentils", "--json", "--top-k", "1"])
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload[0]["slug"], "home-cooking")
+            self.assertGreater(payload[0]["score"], 0)
+
     def test_router_marks_single_existing_atomic_page_as_light_update(self) -> None:
         with isolated_env() as (_, _, wiki_root, _):
             (wiki_root / "topic-a.md").write_text(

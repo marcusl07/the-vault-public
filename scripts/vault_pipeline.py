@@ -22,6 +22,7 @@ try:
     from scripts import vault_pipeline_cli as cli_impl
     from scripts import vault_pipeline_lint as lint_impl
     from scripts import vault_pipeline_query as query_impl
+    from scripts import wiki_search as search_impl
     from scripts import vault_pipeline_wiki as wiki_impl
     from scripts.workspace_fs import atomic_write_text as shared_atomic_write_text
     from scripts.workspace_fs import temporary_workspace as shared_temporary_workspace
@@ -31,6 +32,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution path
     import vault_pipeline_cli as cli_impl
     import vault_pipeline_lint as lint_impl
     import vault_pipeline_query as query_impl
+    import wiki_search as search_impl
     import vault_pipeline_wiki as wiki_impl
     from workspace_fs import atomic_write_text as shared_atomic_write_text
     from workspace_fs import temporary_workspace as shared_temporary_workspace
@@ -1173,6 +1175,30 @@ def trace_page_provenance(slug: str) -> dict[str, list[str]]:
 
 def lint_wiki(*, append_review: bool = False) -> LintReport:
     return lint_impl.lint_wiki(sys.modules[__name__], append_review=append_review)
+
+
+def build_wiki_search_index(*, wiki_root: Path | None = None) -> search_impl.WikiSearchIndex:
+    return search_impl.build_wiki_search_index(sys.modules[__name__], wiki_root=wiki_root)
+
+
+def search_wiki(
+    query: str,
+    *,
+    top_k: int = 5,
+    index: search_impl.WikiSearchIndex | None = None,
+    wiki_root: Path | None = None,
+) -> list[search_impl.WikiSearchResult]:
+    return search_impl.search_wiki(
+        sys.modules[__name__],
+        query,
+        top_k=top_k,
+        index=index,
+        wiki_root=wiki_root,
+    )
+
+
+def search_main(argv: list[str] | None = None) -> int:
+    return search_impl.search_main(sys.modules[__name__], argv)
 
 
 def _default_integration_handler(
