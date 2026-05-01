@@ -123,6 +123,37 @@ def rename_processed(api: ModuleType, path: Path) -> Path:
     return target
 
 
+def discover_capture_candidates(api: ModuleType, capture_root: Path) -> list[Path]:
+    candidates = [
+        path
+        for path in capture_root.iterdir()
+        if path.is_file() and path.suffix == ".md" and not path.name.startswith(api.MARKER_PREFIX)
+    ]
+    return sorted(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def discover_processed_capture_candidates(api: ModuleType, capture_root: Path) -> list[Path]:
+    candidates = [
+        path
+        for path in capture_root.iterdir()
+        if path.is_file() and path.suffix == ".md" and path.name.startswith(api.MARKER_PREFIX)
+    ]
+    return sorted(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def discover_source_capture_id_counts(api: ModuleType, candidate_paths: list[Path]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for path in candidate_paths:
+        try:
+            note = api.read_source_note(path)
+        except Exception:
+            continue
+        if note.capture_id is None:
+            continue
+        counts[note.capture_id] = counts.get(note.capture_id, 0) + 1
+    return counts
+
+
 def capture_ingest(
     api: ModuleType,
     *,

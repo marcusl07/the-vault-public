@@ -282,34 +282,15 @@ def _has_logged_event(event: str, *, capture_id: str | None, filename: str | Non
 
 
 def discover_capture_candidates(capture_root: Path) -> list[Path]:
-    candidates = [
-        path
-        for path in capture_root.iterdir()
-        if path.is_file() and path.suffix == ".md" and not path.name.startswith(MARKER_PREFIX)
-    ]
-    return sorted(candidates, key=lambda path: path.stat().st_mtime)
+    return capture_impl.discover_capture_candidates(sys.modules[__name__], capture_root)
 
 
 def discover_processed_capture_candidates(capture_root: Path) -> list[Path]:
-    candidates = [
-        path
-        for path in capture_root.iterdir()
-        if path.is_file() and path.suffix == ".md" and path.name.startswith(MARKER_PREFIX)
-    ]
-    return sorted(candidates, key=lambda path: path.stat().st_mtime)
+    return capture_impl.discover_processed_capture_candidates(sys.modules[__name__], capture_root)
 
 
 def discover_source_capture_id_counts(candidate_paths: list[Path]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for path in candidate_paths:
-        try:
-            note = read_source_note(path)
-        except Exception:
-            continue
-        if note.capture_id is None:
-            continue
-        counts[note.capture_id] = counts.get(note.capture_id, 0) + 1
-    return counts
+    return capture_impl.discover_source_capture_id_counts(sys.modules[__name__], candidate_paths)
 
 
 def resolve_created_at(note: SourceNote) -> tuple[str, bool]:
