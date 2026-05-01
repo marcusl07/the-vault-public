@@ -8,8 +8,6 @@ from pathlib import Path
 import re
 import sys
 from typing import Callable, Iterator, TextIO, TypedDict
-import unicodedata
-import uuid
 
 try:
     from scripts import bootstrap_wiki as bw
@@ -19,6 +17,7 @@ try:
     from scripts import vault_pipeline_maintenance as maintenance_impl
     from scripts import vault_pipeline_notes as notes_impl
     from scripts import vault_pipeline_query as query_impl
+    from scripts import vault_pipeline_sources as sources_impl
     from scripts import wiki_search as search_impl
     from scripts import vault_pipeline_wiki as wiki_impl
     from scripts.workspace_fs import atomic_write_text as shared_atomic_write_text
@@ -31,6 +30,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution path
     import vault_pipeline_maintenance as maintenance_impl
     import vault_pipeline_notes as notes_impl
     import vault_pipeline_query as query_impl
+    import vault_pipeline_sources as sources_impl
     import wiki_search as search_impl
     import vault_pipeline_wiki as wiki_impl
     from workspace_fs import atomic_write_text as shared_atomic_write_text
@@ -49,8 +49,6 @@ DEFAULT_CAPTURE_ROOT = Path(
 )
 
 MARKER_PREFIX = "✓ "
-_UNSAFE_SLUG_CHARS_RE = re.compile(r"[^a-z0-9\-]+")
-_DASH_RUN_RE = re.compile(r"-{2,}")
 _INDEX_ENTRY_RE = re.compile(r"^- \[\[(?P<slug>[^\]]+)\]\] — (?P<summary>.+)$")
 _SOURCE_LINE_RE = re.compile(r"^- \[(?P<label>[^\]]+)\]\((?P<path>[^)]+)\)(?P<suffix>.*)$")
 _CONNECTION_SLUG_RE = re.compile(r"\[\[(?P<slug>[^\]]+)\]\]")
@@ -194,24 +192,15 @@ def normalize_repo_path(path: str | Path) -> str:
 
 
 def clean_title_from_filename(filename: str) -> str:
-    title = filename[:-3] if filename.endswith(".md") else filename
-    if title.startswith(MARKER_PREFIX):
-        title = title[len(MARKER_PREFIX):]
-    return title
+    return sources_impl.clean_title_from_filename(sys.modules[__name__], filename)
 
 
 def is_placeholder_title(title: str) -> bool:
-    return re.fullmatch(r"untitled(?:\s+\d+)?", title.strip(), flags=re.I) is not None
+    return sources_impl.is_placeholder_title(title)
 
 
 def raw_file_slug(title: str) -> str:
-    normalized = unicodedata.normalize("NFKD", title.strip().lower())
-    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
-    dashed = ascii_text.replace(" ", "-")
-    sanitized = _UNSAFE_SLUG_CHARS_RE.sub("-", dashed)
-    collapsed = _DASH_RUN_RE.sub("-", sanitized).strip("-")
-    trimmed = collapsed[:80].rstrip("-")
-    return trimmed or "untitled"
+    return sources_impl.raw_file_slug(title)
 
 
 def stable_source_id(source_kind: str, identity: str) -> str:
@@ -324,14 +313,7 @@ def discover_source_capture_id_counts(candidate_paths: list[Path]) -> dict[str, 
 
 
 def resolve_created_at(note: SourceNote) -> tuple[str, bool]:
-    existing = note.frontmatter.get("created_at")
-    if isinstance(existing, str) and existing:
-        return existing, False
-    stats = note.path.stat()
-    birthtime = getattr(stats, "st_birthtime", 0)
-    if birthtime:
-        return utc_timestamp(float(birthtime)), False
-    return utc_timestamp(stats.st_mtime), True
+    return sources_impl.resolve_created_at(sys.modules[__name__], note)
 
 
 def render_raw_file(
@@ -342,42 +324,18 @@ def render_raw_file(
     source_file: str,
     body: str,
 ) -> str:
-    external_url = bw.extract_first_url(body)
-    frontmatter: dict[str, object] = {
-        "capture_id": capture_id,
-        "source_kind": "capture",
-        "source_id": stable_source_id("capture", capture_id),
-        "title": title,
-        "created_at": created_at,
-        "source_file": source_file,
-    }
-    if external_url:
-        frontmatter["external_url"] = external_url
-    return (
-        render_note(
-            frontmatter,
-            f"# {title}\n\n{body}",
-            key_order=[
-                "capture_id",
-                "source_kind",
-                "source_id",
-                "title",
-                "created_at",
-                "external_url",
-                "source_file",
-            ],
-        )
+    return sources_impl.render_raw_file(
+        sys.modules[__name__],
+        capture_id=capture_id,
+        title=title,
+        created_at=created_at,
+        source_file=source_file,
+        body=body,
     )
 
 
 def parse_raw_note(path: Path) -> tuple[dict[str, object], str]:
-    text = path.read_text(encoding="utf-8")
-    frontmatter, body, has_frontmatter = split_frontmatter(text)
-    if not has_frontmatter:
-        raise ValueError("raw file missing frontmatter")
-    if not body.strip():
-        raise ValueError("raw file body is empty")
-    return frontmatter, body
+    return sources_impl.parse_raw_note(sys.modules[__name__], path)
 
 
 def persist_chat_source_artifact(
@@ -389,43 +347,15 @@ def persist_chat_source_artifact(
     external_url: str | None = None,
     extra_frontmatter: dict[str, object] | None = None,
 ) -> Path:
-    CHAT_SOURCES_ROOT.mkdir(parents=True, exist_ok=True)
-    identity = f"{created_at}:{title}:{body}"
-    source_id = stable_source_id("chat", uuid.uuid5(uuid.NAMESPACE_URL, identity).hex)
-    target = CHAT_SOURCES_ROOT / f"{raw_file_slug(title)}-{source_id.split(':', 1)[1]}.md"
-    if target.exists():
-        return target
-    frontmatter: dict[str, object] = {
-        "source_kind": "chat",
-        "source_id": source_id,
-        "title": title,
-        "created_at": created_at,
-        "provenance_pointer": conversation_ref,
-    }
-    if external_url:
-        frontmatter["external_url"] = external_url
-    if extra_frontmatter:
-        frontmatter.update(extra_frontmatter)
-    atomic_write_text(
-        target,
-        render_note(
-            frontmatter,
-            f"# {title}\n\n{body}",
-            key_order=[
-                "source_kind",
-                "source_id",
-                "title",
-                "created_at",
-                "external_url",
-                "provenance_pointer",
-                "target_page",
-                "target_note",
-                "fact_key",
-                "replacement_intent",
-            ],
-        ),
+    return sources_impl.persist_chat_source_artifact(
+        sys.modules[__name__],
+        title=title,
+        body=body,
+        created_at=created_at,
+        conversation_ref=conversation_ref,
+        external_url=external_url,
+        extra_frontmatter=extra_frontmatter,
     )
-    return target
 
 
 def _resolve_repo_relative_path(path: str) -> Path:
