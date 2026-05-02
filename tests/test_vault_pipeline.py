@@ -402,6 +402,8 @@ class VaultPipelineTests(unittest.TestCase):
 
             self.assertEqual(outcome.router_decision.action, "heavy_update")
             self.assertTrue(outcome.review_queued)
+            self.assertEqual(outcome.effects.review_items[0].reason, "heavy-update contradiction")
+            self.assertIn('ingest | Capture: "Coffee Preferences" | Router: heavy_update', outcome.effects.wiki_log_entries[0])
             page_text = (wiki_root / "coffee-preferences.md").read_text(encoding="utf-8")
             self.assertIn("## Open Questions", page_text)
             self.assertIn("Potential contradiction after", page_text)
@@ -468,6 +470,7 @@ class VaultPipelineTests(unittest.TestCase):
 
             query_log = (wiki_root / "log.md").read_text(encoding="utf-8")
             self.assertIn('query | writeback | "Coffee Preferences" | Router: heavy_update', query_log)
+            self.assertIn('query | writeback | "Coffee Preferences" | Router: heavy_update', result.effects.wiki_log_entries[0])
 
             index_text = (wiki_root / "index.md").read_text(encoding="utf-8")
             self.assertNotIn("[[review]]", index_text)
@@ -532,6 +535,7 @@ class VaultPipelineTests(unittest.TestCase):
             review_text = (wiki_root / "review.md").read_text(encoding="utf-8")
             self.assertIn("contradiction | home-brew-method", review_text)
             self.assertIn("[../sources/chat/", review_text)
+            self.assertEqual(result.effects.review_items[0].reason, "contradiction | home-brew-method")
 
     def test_query_writeback_chat_fact_supersession_resolves_existing_review_entry(self) -> None:
         with isolated_env() as (_, _, wiki_root, _):
@@ -736,6 +740,7 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertIn(("orphan", "broken-topic"), findings)
             self.assertIn(("missing-outbound-link", "isolated-note"), findings)
             self.assertIn(("contradiction-candidate", "isolated-note"), findings)
+            self.assertEqual(report.review_updates, len(report.effects.review_items))
             self.assertGreater(report.review_updates, 0)
 
             review_text = (wiki_root / "review.md").read_text(encoding="utf-8")
@@ -1949,6 +1954,7 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertEqual(result["processed"], [{"capture_id": "123", "raw_path": "raw/coffee-123.md"}])
             self.assertEqual(result["updated"], [])
             self.assertEqual(result["failed_risk"], [])
+            self.assertEqual([event["event"] for event in result["effects"]["state_events"]], ["discovered", "processed"])
 
     def test_ingest_raw_notes_dry_run_reports_skipped_and_updated_without_appending_state(self) -> None:
         with isolated_env() as (root, raw_root, _, _):

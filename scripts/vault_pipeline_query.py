@@ -48,19 +48,15 @@ def _append_review_backlog_item(
     next_action: str,
     status: str = "open",
 ) -> None:
-    review_path = api.WIKI_ROOT / "review.md"
-    existing = review_path.read_text(encoding="utf-8") if review_path.exists() else "# Wiki Review Backlog\n"
-    page_links = ", ".join(f"[[{slug}]]" for slug in api.bw.ordered_unique(affected_pages)) or "None"
-    source_links = ", ".join(f"[{path}]({path})" for path in api.bw.ordered_unique(source_paths)) or "None"
-    entry = "\n".join(
-        [
-            f"## [{api._today_date()}] {status} | {reason}",
-            f"- Affected pages: {page_links}",
-            f"- Source artifacts: {source_links}",
-            f"- Next action: {next_action}",
-        ]
+    api.apply_operational_effects(
+        api.OperationalEffects.review_item(
+            reason=reason,
+            affected_pages=affected_pages,
+            source_paths=source_paths,
+            next_action=next_action,
+            status=status,
+        )
     )
-    api.atomic_write_text(review_path, existing.rstrip() + "\n\n" + entry + "\n")
 
 
 def _resolve_review_backlog_entries(
@@ -69,46 +65,9 @@ def _resolve_review_backlog_entries(
     reason: str,
     affected_pages: list[str],
 ) -> int:
-    review_path = api.WIKI_ROOT / "review.md"
-    if not review_path.exists():
-        return 0
-    lines = review_path.read_text(encoding="utf-8").splitlines()
-    resolved = 0
-    updated_lines: list[str] = []
-    current_section: list[str] = []
-
-    def flush_section(section: list[str]) -> None:
-        nonlocal resolved
-        if not section:
-            return
-        heading = section[0]
-        if not heading.startswith("## ["):
-            updated_lines.extend(section)
-            return
-        heading_parts = heading.split(" | ", 1)
-        heading_reason = heading_parts[1] if len(heading_parts) == 2 else ""
-        matches_reason = heading_reason == reason
-        has_affected_pages = any(
-            line.startswith("- Affected pages:") and all(f"[[{slug}]]" in line for slug in affected_pages)
-            for line in section[1:]
-        )
-        if matches_reason and has_affected_pages and " open | " in heading:
-            section = [heading.replace(" open | ", " resolved | ", 1), *section[1:]]
-            resolved += 1
-        updated_lines.extend(section)
-
-    for line in lines:
-        if line.startswith("## ["):
-            flush_section(current_section)
-            current_section = [line]
-        elif current_section:
-            current_section.append(line)
-        else:
-            updated_lines.append(line)
-    flush_section(current_section)
-    if resolved:
-        api.atomic_write_text(review_path, "\n".join(updated_lines) + "\n")
-    return resolved
+    return api.apply_operational_effects(
+        api.OperationalEffects.review_resolution(reason=reason, affected_pages=affected_pages)
+    ).review_resolutions
 
 
 def _matching_chat_sources_for_fact(api: ModuleType, page: object, *, fact_key: str) -> list[tuple[str, dict[str, object]]]:
@@ -189,6 +148,7 @@ def query_writeback_chat_fact(
     duplicate_of_source_path: str | None = None
     superseded_source_paths: list[str] = []
     review_queued = False
+    effects = api.OperationalEffects()
     matching_sources = api._matching_chat_sources_for_fact(target_page, fact_key=fact_key)
     for existing_source_path, artifact_frontmatter in matching_sources:
         existing_note = str(artifact_frontmatter.get("target_note", "")).strip()
@@ -205,7 +165,9 @@ def query_writeback_chat_fact(
                 api._remove_source_from_page(target_page, existing_source_path)
                 superseded_source_paths.append(existing_source_path)
             api._remove_open_questions_for_fact(target_page, fact_key=fact_key)
-            api._resolve_review_backlog_entries(reason=f"contradiction | {fact_key}", affected_pages=[target_slug])
+            resolution_effects = api.OperationalEffects.review_resolution(reason=f"contradiction | {fact_key}", affected_pages=[target_slug])
+            effects.extend(resolution_effects)
+            api.apply_operational_effects(resolution_effects)
         else:
             conflicting_notes = sorted(
                 {
@@ -223,7 +185,7 @@ def query_writeback_chat_fact(
                 )
                 if question not in target_page.open_questions:
                     target_page.open_questions.append(question)
-                api._append_review_backlog_item(
+                review_effects = api.OperationalEffects.review_item(
                     reason=f"contradiction | {fact_key}",
                     affected_pages=[target_slug],
                     source_paths=[
@@ -233,6 +195,8 @@ def query_writeback_chat_fact(
                     ],
                     next_action="Confirm which chat-derived fact should remain current on the page.",
                 )
+                effects.extend(review_effects)
+                api.apply_operational_effects(review_effects)
                 review_queued = True
 
         api.bw.add_source_to_page(target_page, source_record, seed_kind="query")
@@ -241,12 +205,14 @@ def query_writeback_chat_fact(
     allow_missing_outbound = bool(normalized_related_pages) or bool(target_page.connections)
     issues = api.bw.validate_page(target_page, allow_missing_outbound=allow_missing_outbound)
     if issues:
-        api._append_review_backlog_item(
+        review_effects = api.OperationalEffects.review_item(
             reason="invalid query writeback",
             affected_pages=[target_slug],
             source_paths=["../" + api.normalize_repo_path(source_path)],
             next_action=f"Repair page shape before applying query writeback: {', '.join(issues)}",
         )
+        effects.extend(review_effects)
+        api.apply_operational_effects(review_effects)
         raise ValueError(f"invalid page '{target_slug}': {', '.join(issues)}")
 
     pages_to_write = {target_slug: target_page}
@@ -270,7 +236,9 @@ def query_writeback_chat_fact(
             summary += " | superseded prior chat fact"
         if review_queued:
             summary += " | review queued"
-        api.bw.append_wiki_query_log(summary)
+        log_effects = api.OperationalEffects.query_log(summary, date=api._today_date())
+        effects.extend(log_effects)
+        api.apply_operational_effects(log_effects)
 
     return api.QueryWritebackResult(
         changed_slugs=changed_slugs,
@@ -279,4 +247,5 @@ def query_writeback_chat_fact(
         review_queued=review_queued,
         superseded_source_paths=superseded_source_paths,
         duplicate_of_source_path=duplicate_of_source_path,
+        effects=effects,
     )

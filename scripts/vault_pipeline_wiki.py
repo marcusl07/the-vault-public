@@ -375,24 +375,25 @@ def _append_wiki_ingest_log(
     router_decision: object | None = None,
     deferred_items: list[str] | None = None,
 ) -> None:
-    log_path = api.WIKI_ROOT / "log.md"
-    existing = log_path.read_text(encoding="utf-8") if log_path.exists() else "# Wiki Log\n"
-    entry = f'## [{api._today_date()}] ingest | Capture: "{title}"'
-    if router_decision is not None:
-        entry += f" | Router: {router_decision.action}"
-    if deferred_items:
-        entry += f" | Deferred: {len(deferred_items)}"
-    api.atomic_write_text(log_path, existing.rstrip() + "\n\n" + entry + "\n")
+    api.apply_operational_effects(
+        api.OperationalEffects.ingest_log(
+            title,
+            date=api._today_date(),
+            router_decision=router_decision,
+            deferred_items=deferred_items,
+        )
+    )
 
 
 def _append_bootstrap_pipeline_log(api: ModuleType, *, processed_sources: int, changed_pages: int, failed_sources: int) -> None:
-    log_path = api.WIKI_ROOT / "log.md"
-    existing = log_path.read_text(encoding="utf-8") if log_path.exists() else "# Wiki Log\n"
-    entry = (
-        f"## [{api._today_date()}] bootstrap | pipeline | Sources: {processed_sources} | "
-        f"Changed pages: {changed_pages} | Failed sources: {failed_sources}"
+    api.apply_operational_effects(
+        api.OperationalEffects.bootstrap_log(
+            date=api._today_date(),
+            processed_sources=processed_sources,
+            changed_pages=changed_pages,
+            failed_sources=failed_sources,
+        )
     )
-    api.atomic_write_text(log_path, existing.rstrip() + "\n\n" + entry + "\n")
 
 
 def _upsert_wiki_pages_for_note(
@@ -410,8 +411,9 @@ def _upsert_wiki_pages_for_note(
     source_record = api._source_record_from_artifact(frontmatter, title, body, raw_path)
     page_assignments = api._build_default_page_assignments(title, body, raw_path)
     router_decision = api._route_source_update(title=title, body=body, page_assignments=page_assignments)
+    effects = api.OperationalEffects()
     if router_decision.action == "ignore":
-        return api.MaintenanceOutcome(router_decision=router_decision)
+        return api.MaintenanceOutcome(router_decision=router_decision, effects=effects)
     loaded_pages: dict[str, object] = {}
 
     def load_page(slug: str, seed_kind: str) -> object:
@@ -454,7 +456,7 @@ def _upsert_wiki_pages_for_note(
             router_decision=router_decision,
             budget=effective_budget,
         )
-        _touched_pages, changed_slugs, review_queued = api._apply_heavy_update_proposal(
+        _touched_pages, changed_slugs, review_queued, review_effects = api._apply_heavy_update_proposal(
             title=title,
             source_record=source_record,
             loaded_pages=loaded_pages,
@@ -462,13 +464,22 @@ def _upsert_wiki_pages_for_note(
             proposal=proposal,
             budget=effective_budget,
         )
+        effects.extend(review_effects)
         api._rewrite_index([(slug, loaded_pages[slug].page_type) for slug in changed_slugs])
-        api._append_wiki_ingest_log(title, router_decision=router_decision, deferred_items=proposal.deferred_items)
+        log_effects = api.OperationalEffects.ingest_log(
+            title,
+            date=api._today_date(),
+            router_decision=router_decision,
+            deferred_items=proposal.deferred_items,
+        )
+        effects.extend(log_effects)
+        api.apply_operational_effects(log_effects)
         return api.MaintenanceOutcome(
             changed_slugs=changed_slugs,
             router_decision=router_decision,
             review_queued=review_queued,
             deferred_items=proposal.deferred_items,
+            effects=effects,
         )
 
     content_owner_slug = api._content_owner_slug(resolved_assignments)
@@ -527,19 +538,29 @@ def _upsert_wiki_pages_for_note(
         changed_slugs.append(slug)
 
     if deferred_items:
-        api._append_review_backlog_item(
+        review_effects = api.OperationalEffects.review_item(
             reason="light-update deferred work",
             affected_pages=[slug for slug, _seed_kind, _parent_slug in resolved_assignments],
             source_paths=[source_record.path],
             next_action="Add a meaningful outbound link or revise the page split before applying this source.",
         )
+        effects.extend(review_effects)
+        api.apply_operational_effects(review_effects)
     api._rewrite_index([(slug, loaded_pages[slug].page_type) for slug in changed_slugs])
-    api._append_wiki_ingest_log(title, router_decision=router_decision, deferred_items=deferred_items)
+    log_effects = api.OperationalEffects.ingest_log(
+        title,
+        date=api._today_date(),
+        router_decision=router_decision,
+        deferred_items=deferred_items,
+    )
+    effects.extend(log_effects)
+    api.apply_operational_effects(log_effects)
     return api.MaintenanceOutcome(
         changed_slugs=changed_slugs,
         router_decision=router_decision,
         review_queued=review_queued,
         deferred_items=deferred_items,
+        effects=effects,
     )
 
 
@@ -580,11 +601,12 @@ def bootstrap_integrate_sources(
         changed_slugs.update(outcome.changed_slugs)
 
     if selected_paths:
-        api._append_bootstrap_pipeline_log(
+        api.apply_operational_effects(api.OperationalEffects.bootstrap_log(
+            date=api._today_date(),
             processed_sources=processed_sources,
             changed_pages=len(changed_slugs),
             failed_sources=len(failed_sources),
-        )
+        ))
 
     return {
         "processed_sources": processed_sources,
@@ -599,10 +621,10 @@ def _default_integration_handler(
     raw_path: Path,
     *,
     page_resynthesis_on_touch: bool = False,
-) -> None:
+) -> object:
     _ = capture_id
     frontmatter, title, body = api._read_raw_note(raw_path)
-    api._upsert_wiki_pages_for_note(
+    return api._upsert_wiki_pages_for_note(
         frontmatter=frontmatter,
         title=title,
         body=body,
@@ -626,6 +648,7 @@ def ingest_raw_notes(
 ) -> object:
     active_handler = integration_handler or api._default_integration_handler
     if dry_run:
+        effects = api.OperationalEffects()
         result = {"integrated": [], "skipped": [], "failed": [], "discovered": [], "updated": [], "processed": [], "failed_risk": []}
         for raw_item in items:
             try:
@@ -653,6 +676,7 @@ def ingest_raw_notes(
                 prior_state = api.latest_state_record(str(state_item["item_id"]), state_path=state_path)
                 if not api.state_item_seen(str(state_item["item_id"]), state_path=state_path):
                     discovered = {"event": "discovered", **state_payload}
+                    effects.extend(api.OperationalEffects.state_event(discovered))
                     result["discovered"].append(discovered)
                     api.debug_print(f"Would discover {item['capture_id']}", enabled=debug, stream=debug_stream)
 
@@ -668,24 +692,29 @@ def ingest_raw_notes(
                 unchanged_legacy_item = prior_state is None and legacy_integrated
                 if (unchanged_in_state or unchanged_legacy_item) and not retry_failed:
                     skipped = {"event": "skipped", **state_payload, "reason": "unchanged"}
+                    effects.extend(api.OperationalEffects.state_event(skipped))
                     result["skipped"].append(item)
                     api.debug_print(f"Would skip {item['capture_id']}: unchanged", enabled=debug, stream=debug_stream)
                     continue
 
                 if prior_state is not None and prior_state.get("content_hash") != state_item["content_hash"]:
                     updated = {"event": "updated", **state_payload}
+                    effects.extend(api.OperationalEffects.state_event(updated))
                     result["updated"].append(updated)
                     api.debug_print(f"Would update {item['capture_id']}", enabled=debug, stream=debug_stream)
 
+                effects.extend(api.OperationalEffects.state_event({"event": "processed", **state_payload}))
                 result["processed"].append(item)
                 api.debug_print(f"Would process {item['capture_id']}", enabled=debug, stream=debug_stream)
             except Exception as exc:
                 fallback_item = raw_item if isinstance(raw_item, dict) else {"item": repr(raw_item)}
                 result["failed_risk"].append({"item": fallback_item, "error": str(exc)})
                 api.debug_print(f"Failed risk for ingest item: {exc}", enabled=debug, stream=debug_stream)
+        result["effects"] = effects.to_dict()
         return result
 
     validated = api.validate_ingest_inputs(items)
+    effects = api.OperationalEffects()
     result = {"integrated": [], "skipped": [], "failed": []}
 
     for item in validated:
@@ -700,7 +729,9 @@ def ingest_raw_notes(
         }
         prior_state = api.latest_state_record(str(state_item["item_id"]), state_path=state_path)
         if not api.state_item_seen(str(state_item["item_id"]), state_path=state_path):
-            api.append_state_event({"event": "discovered", **state_payload}, state_path=state_path)
+            state_effects = api.OperationalEffects.state_event({"event": "discovered", **state_payload})
+            effects.extend(state_effects)
+            api.apply_operational_effects(state_effects, state_path=state_path)
         legacy_integrated = (
             api._latest_ingest_event(capture_id=item["capture_id"], raw_path=item["raw_path"], log_path=log_path)
             == "integrated"
@@ -712,7 +743,9 @@ def ingest_raw_notes(
         )
         unchanged_legacy_item = prior_state is None and legacy_integrated
         if (unchanged_in_state or unchanged_legacy_item) and not retry_failed:
-            api.append_state_event({"event": "skipped", **state_payload, "reason": "unchanged"}, state_path=state_path)
+            state_effects = api.OperationalEffects.state_event({"event": "skipped", **state_payload, "reason": "unchanged"})
+            effects.extend(state_effects)
+            api.apply_operational_effects(state_effects, state_path=state_path)
             result["skipped"].append(item)
             continue
 
@@ -720,20 +753,28 @@ def ingest_raw_notes(
         for _ in range(3):
             try:
                 if active_handler is api._default_integration_handler:
-                    active_handler(
+                    handler_result = active_handler(
                         item["capture_id"],
                         raw_abspath,
                         page_resynthesis_on_touch=page_resynthesis_on_touch,
                     )
                 else:
-                    active_handler(item["capture_id"], raw_abspath)
-                api.append_jsonl_event(
-                    {"event": "integrated", "capture_id": item["capture_id"], "raw_path": item["raw_path"]},
-                    log_path=log_path,
+                    handler_result = active_handler(item["capture_id"], raw_abspath)
+                handler_effects = getattr(handler_result, "effects", None)
+                if handler_effects is not None:
+                    effects.extend(handler_effects)
+                jsonl_effects = api.OperationalEffects.jsonl_event(
+                    {"event": "integrated", "capture_id": item["capture_id"], "raw_path": item["raw_path"]}
                 )
+                effects.extend(jsonl_effects)
+                api.apply_operational_effects(jsonl_effects, log_path=log_path)
                 if prior_state is not None and prior_state.get("content_hash") != state_item["content_hash"]:
-                    api.append_state_event({"event": "updated", **state_payload}, state_path=state_path)
-                api.append_state_event({"event": "processed", **state_payload}, state_path=state_path)
+                    state_effects = api.OperationalEffects.state_event({"event": "updated", **state_payload})
+                    effects.extend(state_effects)
+                    api.apply_operational_effects(state_effects, state_path=state_path)
+                state_effects = api.OperationalEffects.state_event({"event": "processed", **state_payload})
+                effects.extend(state_effects)
+                api.apply_operational_effects(state_effects, state_path=state_path)
                 api.debug_print(f"Integrated {item['capture_id']}", enabled=debug, stream=debug_stream)
                 result["integrated"].append(item)
                 last_error = None
@@ -742,25 +783,28 @@ def ingest_raw_notes(
                 last_error = exc
         if last_error is not None:
             error_summary = str(last_error)
-            api.append_jsonl_event(
+            jsonl_effects = api.OperationalEffects.jsonl_event(
                 {
                     "event": "integrate_failed",
                     "capture_id": item["capture_id"],
                     "raw_path": item["raw_path"],
                     "error": error_summary,
-                },
-                log_path=log_path,
+                }
             )
-            api.append_state_event(
+            effects.extend(jsonl_effects)
+            api.apply_operational_effects(jsonl_effects, log_path=log_path)
+            state_effects = api.OperationalEffects.state_event(
                 {
                     "event": "failed",
                     **state_payload,
                     "stage": "wiki_ingest",
                     "error_summary": error_summary,
-                },
-                state_path=state_path,
+                }
             )
+            effects.extend(state_effects)
+            api.apply_operational_effects(state_effects, state_path=state_path)
             result["failed"].append(item)
             api.debug_print(f"Integration failed for {item['capture_id']}: {last_error}", enabled=debug, stream=debug_stream)
 
+    result["effects"] = effects.to_dict()
     return result

@@ -176,8 +176,9 @@ def _apply_heavy_update_proposal(
     resolved_assignments: list[tuple[str, str, str | None]],
     proposal: HeavyUpdateProposal,
     budget: MaintenanceBudget,
-) -> tuple[dict[str, object], list[str], bool]:
+) -> tuple[dict[str, object], list[str], bool, object]:
     touched_pages: dict[str, object] = {}
+    effects = api.OperationalEffects()
 
     for slug, page_proposal in proposal.proposed_new_pages.items():
         page = loaded_pages.get(slug)
@@ -273,10 +274,12 @@ def _apply_heavy_update_proposal(
         next_action = "Review contradiction items and confirm the correct current wiki state."
         if proposal.deferred_items and not proposal.contradiction_items:
             next_action = "Resume deferred heavy maintenance for the queued pages."
-        api._append_review_backlog_item(
+        review_effects = api.OperationalEffects.review_item(
             reason=reason,
             affected_pages=ordered_touched,
             source_paths=[source_record.path],
             next_action=next_action,
         )
-    return touched_pages, changed_slugs, review_queued
+        effects.extend(review_effects)
+        api.apply_operational_effects(review_effects)
+    return touched_pages, changed_slugs, review_queued, effects

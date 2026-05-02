@@ -16,6 +16,7 @@ try:
     from scripts import vault_pipeline_lint as lint_impl
     from scripts import vault_pipeline_maintenance as maintenance_impl
     from scripts import vault_pipeline_notes as notes_impl
+    from scripts import vault_pipeline_operations as operations_impl
     from scripts import vault_pipeline_query as query_impl
     from scripts import vault_pipeline_sources as sources_impl
     from scripts import wiki_search as search_impl
@@ -29,6 +30,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution path
     import vault_pipeline_lint as lint_impl
     import vault_pipeline_maintenance as maintenance_impl
     import vault_pipeline_notes as notes_impl
+    import vault_pipeline_operations as operations_impl
     import vault_pipeline_query as query_impl
     import vault_pipeline_sources as sources_impl
     import wiki_search as search_impl
@@ -150,6 +152,7 @@ class MaintenanceOutcome:
     router_decision: RouterDecision | None = None
     review_queued: bool = False
     deferred_items: list[str] = field(default_factory=list)
+    effects: operations_impl.OperationalEffects = field(default_factory=operations_impl.OperationalEffects)
 
 
 @dataclass
@@ -160,6 +163,7 @@ class QueryWritebackResult:
     review_queued: bool = False
     superseded_source_paths: list[str] = field(default_factory=list)
     duplicate_of_source_path: str | None = None
+    effects: operations_impl.OperationalEffects = field(default_factory=operations_impl.OperationalEffects)
 
 
 @dataclass(frozen=True)
@@ -174,10 +178,14 @@ class LintFinding:
 class LintReport:
     findings: list[LintFinding] = field(default_factory=list)
     review_updates: int = 0
+    effects: operations_impl.OperationalEffects = field(default_factory=operations_impl.OperationalEffects)
 
 
 SourceNote = notes_impl.SourceNote
 SourceArtifact = sources_impl.SourceArtifact
+OperationalEffects = operations_impl.OperationalEffects
+OperationalSink = operations_impl.OperationalSink
+AppliedOperationalEffects = operations_impl.AppliedOperationalEffects
 MaintenanceBudget = maintenance_impl.MaintenanceBudget
 HeavyPageDelta = maintenance_impl.HeavyPageDelta
 HeavyNewPageProposal = maintenance_impl.HeavyNewPageProposal
@@ -246,7 +254,7 @@ def write_source_note(path: Path, frontmatter: dict[str, object], body: str) -> 
 
 
 def append_jsonl_event(payload: dict[str, object], log_path: Path | None = None) -> None:
-    notes_impl.append_jsonl_event(payload, log_path or JSONL_LOG_PATH, timestamp=utc_timestamp, fsync=os.fsync)
+    operational_sink().apply(operations_impl.OperationalEffects.jsonl_event(payload), log_path=log_path)
 
 
 def sha256_file(path: Path) -> str:
@@ -254,7 +262,20 @@ def sha256_file(path: Path) -> str:
 
 
 def append_state_event(payload: dict[str, object], state_path: Path | None = None) -> None:
-    append_jsonl_event(payload, log_path=state_path or STATE_EVENTS_PATH)
+    operational_sink().apply(operations_impl.OperationalEffects.state_event(payload), state_path=state_path)
+
+
+def operational_sink() -> operations_impl.OperationalSink:
+    return operations_impl.OperationalSink(sys.modules[__name__])
+
+
+def apply_operational_effects(
+    effects: operations_impl.OperationalEffects,
+    *,
+    log_path: Path | None = None,
+    state_path: Path | None = None,
+) -> operations_impl.AppliedOperationalEffects:
+    return operational_sink().apply(effects, log_path=log_path, state_path=state_path)
 
 
 def raw_state_item(raw_path: Path | SourceArtifact, frontmatter: dict[str, object] | None = None) -> dict[str, object]:
@@ -368,13 +389,14 @@ def _append_review_backlog_item(
     next_action: str,
     status: str = "open",
 ) -> None:
-    query_impl._append_review_backlog_item(
-        sys.modules[__name__],
-        reason=reason,
-        affected_pages=affected_pages,
-        source_paths=source_paths,
-        next_action=next_action,
-        status=status,
+    apply_operational_effects(
+        operations_impl.OperationalEffects.review_item(
+            reason=reason,
+            affected_pages=affected_pages,
+            source_paths=source_paths,
+            next_action=next_action,
+            status=status,
+        )
     )
 
 
@@ -383,11 +405,9 @@ def _resolve_review_backlog_entries(
     reason: str,
     affected_pages: list[str],
 ) -> int:
-    return query_impl._resolve_review_backlog_entries(
-        sys.modules[__name__],
-        reason=reason,
-        affected_pages=affected_pages,
-    )
+    return apply_operational_effects(
+        operations_impl.OperationalEffects.review_resolution(reason=reason, affected_pages=affected_pages)
+    ).review_resolutions
 
 
 def _matching_chat_sources_for_fact(page: bw.Page, *, fact_key: str) -> list[tuple[str, dict[str, object]]]:
@@ -454,7 +474,7 @@ def _apply_heavy_update_proposal(
     resolved_assignments: list[tuple[str, str, str | None]],
     proposal: HeavyUpdateProposal,
     budget: MaintenanceBudget,
-) -> tuple[dict[str, bw.Page], list[str], bool]:
+) -> tuple[dict[str, bw.Page], list[str], bool, OperationalEffects]:
     return maintenance_impl._apply_heavy_update_proposal(
         sys.modules[__name__],
         title=title,
@@ -664,20 +684,24 @@ def _append_wiki_ingest_log(
     router_decision: RouterDecision | None = None,
     deferred_items: list[str] | None = None,
 ) -> None:
-    wiki_impl._append_wiki_ingest_log(
-        sys.modules[__name__],
-        title,
-        router_decision=router_decision,
-        deferred_items=deferred_items,
+    apply_operational_effects(
+        operations_impl.OperationalEffects.ingest_log(
+            title,
+            date=_today_date(),
+            router_decision=router_decision,
+            deferred_items=deferred_items,
+        )
     )
 
 
 def _append_bootstrap_pipeline_log(*, processed_sources: int, changed_pages: int, failed_sources: int) -> None:
-    wiki_impl._append_bootstrap_pipeline_log(
-        sys.modules[__name__],
-        processed_sources=processed_sources,
-        changed_pages=changed_pages,
-        failed_sources=failed_sources,
+    apply_operational_effects(
+        operations_impl.OperationalEffects.bootstrap_log(
+            date=_today_date(),
+            processed_sources=processed_sources,
+            changed_pages=changed_pages,
+            failed_sources=failed_sources,
+        )
     )
 
 
@@ -780,8 +804,8 @@ def _default_integration_handler(
     raw_path: Path,
     *,
     page_resynthesis_on_touch: bool = False,
-) -> None:
-    wiki_impl._default_integration_handler(
+) -> MaintenanceOutcome:
+    return wiki_impl._default_integration_handler(
         sys.modules[__name__],
         capture_id,
         raw_path,

@@ -90,6 +90,7 @@ def lint_wiki(api: ModuleType, *, append_review: bool = False) -> object:
                 findings.append(api.LintFinding(kind="dead-link", slug=slug, detail=f"missing linked page: [[{connection_slug}]]"))
 
     review_updates = 0
+    effects = api.OperationalEffects()
     if append_review:
         seen_review_keys: set[tuple[str, str, str]] = set()
         for finding in findings:
@@ -99,12 +100,14 @@ def lint_wiki(api: ModuleType, *, append_review: bool = False) -> object:
             if review_key in seen_review_keys:
                 continue
             seen_review_keys.add(review_key)
-            api._append_review_backlog_item(
+            review_effects = api.OperationalEffects.review_item(
                 reason=f"lint | {finding.kind}",
                 affected_pages=[finding.slug],
                 source_paths=list(finding.source_paths),
                 next_action=f"Resolve lint finding: {finding.detail}",
             )
+            effects.extend(review_effects)
+            api.apply_operational_effects(review_effects)
             review_updates += 1
 
-    return api.LintReport(findings=findings, review_updates=review_updates)
+    return api.LintReport(findings=findings, review_updates=review_updates, effects=effects)
