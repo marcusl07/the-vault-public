@@ -384,35 +384,6 @@ def _remove_open_questions_for_fact(page: bw.Page, *, fact_key: str) -> None:
     query_impl._remove_open_questions_for_fact(sys.modules[__name__], page, fact_key=fact_key)
 
 
-def _append_review_backlog_item(
-    *,
-    reason: str,
-    affected_pages: list[str],
-    source_paths: list[str],
-    next_action: str,
-    status: str = "open",
-) -> None:
-    apply_operational_effects(
-        operations_impl.OperationalEffects.review_item(
-            reason=reason,
-            affected_pages=affected_pages,
-            source_paths=source_paths,
-            next_action=next_action,
-            status=status,
-        )
-    )
-
-
-def _resolve_review_backlog_entries(
-    *,
-    reason: str,
-    affected_pages: list[str],
-) -> int:
-    return apply_operational_effects(
-        operations_impl.OperationalEffects.review_resolution(reason=reason, affected_pages=affected_pages)
-    ).review_resolutions
-
-
 def _matching_chat_sources_for_fact(page: bw.Page, *, fact_key: str) -> list[tuple[str, dict[str, object]]]:
     return query_impl._matching_chat_sources_for_fact(sys.modules[__name__], page, fact_key=fact_key)
 
@@ -588,10 +559,6 @@ def _content_owner_slug(assignments: list[tuple[str, str, str | None]]) -> str |
     return wiki_impl._content_owner_slug(sys.modules[__name__], assignments)
 
 
-def _source_record_from_artifact(frontmatter: dict[str, object], title: str, body: str, source_path: Path) -> bw.SourceRecord:
-    return wiki_impl._source_record_from_artifact(sys.modules[__name__], frontmatter, title, body, source_path)
-
-
 def source_artifact_to_evidence(artifact: SourceArtifact) -> bw.SourceEvidence:
     return wiki_impl.source_artifact_to_evidence(sys.modules[__name__], artifact)
 
@@ -734,7 +701,6 @@ def query_writeback_chat_fact(
 
 def _upsert_wiki_pages_for_note(
     *,
-    frontmatter: dict[str, object],
     title: str,
     body: str,
     raw_path: Path,
@@ -745,7 +711,6 @@ def _upsert_wiki_pages_for_note(
 ) -> MaintenanceOutcome:
     return wiki_impl._upsert_wiki_pages_for_note(
         sys.modules[__name__],
-        frontmatter=frontmatter,
         title=title,
         body=body,
         raw_path=raw_path,

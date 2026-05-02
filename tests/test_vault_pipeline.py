@@ -394,7 +394,6 @@ class VaultPipelineTests(unittest.TestCase):
             )
 
             outcome = vp._upsert_wiki_pages_for_note(
-                frontmatter=vp.parse_raw_note(raw_path)[0],
                 title="Coffee Preferences",
                 body="Marcus prefers espresso over pourover at home.",
                 raw_path=raw_path,
@@ -432,7 +431,6 @@ class VaultPipelineTests(unittest.TestCase):
             )
 
             outcome = vp._upsert_wiki_pages_for_note(
-                frontmatter=vp.parse_raw_note(raw_path)[0],
                 title="Budgeted Note",
                 body="Marcus prefers a smaller, bounded maintenance budget.",
                 raw_path=raw_path,
@@ -672,7 +670,6 @@ class VaultPipelineTests(unittest.TestCase):
             )
 
             outcome = vp._upsert_wiki_pages_for_note(
-                frontmatter=vp.parse_raw_note(raw_path)[0],
                 title="Isolated Note",
                 body="A standalone note with no related pages yet.",
                 raw_path=raw_path,
@@ -731,7 +728,6 @@ class VaultPipelineTests(unittest.TestCase):
             )
 
             outcome = vp._upsert_wiki_pages_for_note(
-                frontmatter=vp.parse_raw_note(raw_path)[0],
                 title="Coffee Grinder",
                 body="Coffee tastes better when the grinder is dialed in.",
                 raw_path=raw_path,
@@ -904,7 +900,6 @@ class VaultPipelineTests(unittest.TestCase):
             )
 
             outcome = vp._upsert_wiki_pages_for_note(
-                frontmatter=vp.parse_raw_note(raw_path)[0],
                 title="Coffee",
                 body="Coffee tastes better when the grinder is dialed in.",
                 raw_path=raw_path,

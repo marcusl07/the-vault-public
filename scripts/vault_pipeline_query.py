@@ -39,37 +39,6 @@ def _remove_open_questions_for_fact(api: ModuleType, page: object, *, fact_key: 
     page.open_questions = [question for question in page.open_questions if not question.startswith(prefix)]
 
 
-def _append_review_backlog_item(
-    api: ModuleType,
-    *,
-    reason: str,
-    affected_pages: list[str],
-    source_paths: list[str],
-    next_action: str,
-    status: str = "open",
-) -> None:
-    api.apply_operational_effects(
-        api.OperationalEffects.review_item(
-            reason=reason,
-            affected_pages=affected_pages,
-            source_paths=source_paths,
-            next_action=next_action,
-            status=status,
-        )
-    )
-
-
-def _resolve_review_backlog_entries(
-    api: ModuleType,
-    *,
-    reason: str,
-    affected_pages: list[str],
-) -> int:
-    return api.apply_operational_effects(
-        api.OperationalEffects.review_resolution(reason=reason, affected_pages=affected_pages)
-    ).review_resolutions
-
-
 def _matching_chat_sources_for_fact(api: ModuleType, page: object, *, fact_key: str) -> list[tuple[str, dict[str, object]]]:
     matches: list[tuple[str, dict[str, object]]] = []
     for source_path, source in page.sources.items():

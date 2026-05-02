@@ -104,17 +104,6 @@ def _content_owner_slug(api: ModuleType, assignments: list[tuple[str, str, str |
     return assignments[0][0]
 
 
-def _source_record_from_artifact(
-    api: ModuleType,
-    frontmatter: dict[str, object],
-    title: str,
-    body: str,
-    source_path: Path,
-) -> object:
-    artifact = api.read_source_artifact(source_path)
-    return api.source_artifact_to_evidence(artifact)
-
-
 def source_artifact_to_evidence(api: ModuleType, artifact: object) -> object:
     return api.bw.source_artifact_to_evidence(
         artifact,
@@ -399,7 +388,6 @@ def _append_bootstrap_pipeline_log(api: ModuleType, *, processed_sources: int, c
 def _upsert_wiki_pages_for_note(
     api: ModuleType,
     *,
-    frontmatter: dict[str, object],
     title: str,
     body: str,
     raw_path: Path,
@@ -409,8 +397,8 @@ def _upsert_wiki_pages_for_note(
     write_ingest_log: bool = True,
 ) -> object:
     _ = page_resynthesis_on_touch
-    effective_budget = budget or api._default_maintenance_budget()
-    source_record = api._source_record_from_artifact(frontmatter, title, body, raw_path)
+    effective_budget = budget or api._default_maintenance_budget(mode=mode if mode == "bootstrap" else "routine")
+    source_record = api.source_artifact_to_evidence(api.read_source_artifact(raw_path))
     page_assignments = api._build_default_page_assignments(title, body, raw_path)
     router_decision = api._route_source_update(title=title, body=body, page_assignments=page_assignments)
     effects = api.OperationalEffects()
@@ -595,7 +583,6 @@ def maintain_source_artifact(
     effective_budget = budget or api._default_maintenance_budget(mode=mode if mode == "bootstrap" else "routine")
     write_ingest_log = bool(options.get("write_ingest_log", mode == "ingest"))
     return api._upsert_wiki_pages_for_note(
-        frontmatter=artifact.frontmatter,
         title=artifact.title,
         body=body,
         raw_path=source_path,
