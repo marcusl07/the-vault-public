@@ -221,102 +221,6 @@ def _route_source_update(
     )
 
 
-def _build_bootstrap_page_for_touch(
-    api: ModuleType,
-    *,
-    slug: str,
-    seed_kind: str,
-    original_title: str,
-    parsed_page: dict[str, object],
-    new_source_record: object,
-    new_note_snippet: str,
-    related_slugs: list[str],
-) -> object:
-    page = api.bw.Page(
-        slug=slug,
-        title=str(parsed_page["title"] or api.bw.page_title(slug)),
-        page_type=api.bw.classify_page(slug, original_title, seed_kind),
-        summary_hint=original_title,
-    )
-    page.seed_kinds.add(seed_kind)
-
-    existing_note_snippets = api._parse_existing_note_snippets(list(parsed_page["notes"]))
-    for note in existing_note_snippets:
-        if note not in page.notes:
-            page.notes.append(note)
-    normalized_new_note = api.bw.strip_markdown(new_note_snippet.lstrip("- ").strip()).strip()
-    if normalized_new_note and normalized_new_note not in page.notes:
-        page.notes.append(normalized_new_note)
-
-    retained_evidence = "\n".join(f"- {note}" for note in page.notes)
-    for line in list(parsed_page["sources"]):
-        source_record = api._parse_source_line(line, retained_evidence)
-        if source_record is not None:
-            page.sources[source_record.path] = source_record
-    page.sources[new_source_record.path] = new_source_record
-
-    merged_connection_slugs = api._parse_connection_slugs(list(parsed_page["connections"]))
-    for other_slug in related_slugs:
-        if other_slug not in merged_connection_slugs:
-            merged_connection_slugs.append(other_slug)
-    for other_slug in merged_connection_slugs:
-        if other_slug != slug:
-            page.connections[other_slug] += 1
-
-    return page
-
-
-def _parse_existing_page(api: ModuleType, page_path: Path) -> dict[str, object]:
-    if not page_path.exists():
-        return {"title": None, "summary": "", "notes": [], "connections": [], "sources": []}
-
-    parsed = api.bw.parse_page_file(page_path)
-    return {
-        "title": parsed.title,
-        "summary": "\n".join(parsed.summary_lines).strip(),
-        "notes": list(parsed.note_lines),
-        "connections": [f"- [[{slug}]]" for slug in parsed.connection_slugs],
-        "sources": api.bw.render_source_lines(api.bw.parsed_page_to_page(parsed)),
-    }
-
-
-def _render_merged_page(
-    api: ModuleType,
-    *,
-    page_title: str,
-    summary: str,
-    note_lines: list[str],
-    connection_lines: list[str],
-    source_lines: list[str],
-) -> str:
-    return "\n".join(
-        [
-            f"# {page_title}",
-            "",
-            summary,
-            "",
-            "## Notes",
-            "",
-            "\n".join(note_lines) if note_lines else "- No notes yet.",
-            "",
-            "## Connections",
-            "",
-            "\n".join(connection_lines),
-            "",
-            "## Sources",
-            "",
-            "\n".join(source_lines),
-            "",
-        ]
-    )
-
-
-def _count_page_sources(api: ModuleType, page_path: Path) -> int:
-    if not page_path.exists():
-        return 0
-    return len(api.bw.parse_page_file(page_path).sources)
-
-
 def _rewrite_index(api: ModuleType, changed_pages: list[tuple[str, str]]) -> None:
     index_path = api.WIKI_ROOT / "index.md"
     page_types = api.bw.load_existing_page_types(index_path)
@@ -391,12 +295,10 @@ def _upsert_wiki_pages_for_note(
     title: str,
     body: str,
     raw_path: Path,
-    page_resynthesis_on_touch: bool = False,
     budget: object | None = None,
     mode: str = "ingest",
     write_ingest_log: bool = True,
 ) -> object:
-    _ = page_resynthesis_on_touch
     effective_budget = budget or api._default_maintenance_budget(mode=mode if mode == "bootstrap" else "routine")
     source_record = api.source_artifact_to_evidence(api.read_source_artifact(raw_path))
     page_assignments = api._build_default_page_assignments(title, body, raw_path)
@@ -586,7 +488,6 @@ def maintain_source_artifact(
         title=artifact.title,
         body=body,
         raw_path=source_path,
-        page_resynthesis_on_touch=bool(options.get("page_resynthesis_on_touch", False)),
         budget=effective_budget,
         mode=mode,
         write_ingest_log=write_ingest_log,
@@ -653,14 +554,11 @@ def _default_integration_handler(
     api: ModuleType,
     capture_id: str,
     raw_path: Path,
-    *,
-    page_resynthesis_on_touch: bool = False,
 ) -> object:
     _ = capture_id
     return api.maintain_source_artifact(
         raw_path,
         mode="ingest",
-        options={"page_resynthesis_on_touch": page_resynthesis_on_touch},
     )
 
 
@@ -670,7 +568,6 @@ def ingest_raw_notes(
     *,
     integration_handler: Callable[[str, Path], None] | None = None,
     retry_failed: bool = False,
-    page_resynthesis_on_touch: bool = False,
     debug: bool = False,
     debug_stream: TextIO | None = None,
     log_path: Path | None = None,
@@ -787,7 +684,6 @@ def ingest_raw_notes(
                     handler_result = active_handler(
                         item["capture_id"],
                         raw_abspath,
-                        page_resynthesis_on_touch=page_resynthesis_on_touch,
                     )
                 else:
                     handler_result = active_handler(item["capture_id"], raw_abspath)

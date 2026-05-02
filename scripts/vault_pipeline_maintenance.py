@@ -67,13 +67,15 @@ def _assemble_heavy_context(
     router_decision: object,
     loaded_pages: dict[str, object],
     budget: MaintenanceBudget,
+    target_pages: list[str] | None = None,
 ) -> tuple[list[str], list[str]]:
     context_chunks = [title.strip(), body.strip()]
     selected_targets: list[str] = []
     total_chars = sum(len(chunk) for chunk in context_chunks)
     deferred_items: list[str] = []
+    candidate_targets = target_pages if target_pages is not None else router_decision.target_pages
 
-    for slug in router_decision.target_pages:
+    for slug in candidate_targets:
         if len(selected_targets) >= budget.max_candidate_pages:
             deferred_items.append(f"Deferred page '{slug}' because candidate page budget was exceeded.")
             continue
@@ -87,12 +89,12 @@ def _assemble_heavy_context(
             continue
         selected_targets.append(slug)
         total_chars = projected
-    if not selected_targets and router_decision.target_pages:
-        selected_targets.append(router_decision.target_pages[0])
+    if not selected_targets and candidate_targets:
+        selected_targets.append(candidate_targets[0])
         deferred_items = [
             item
             for item in deferred_items
-            if f"'{router_decision.target_pages[0]}'" not in item
+            if f"'{candidate_targets[0]}'" not in item
         ]
     return selected_targets, deferred_items
 
@@ -107,12 +109,14 @@ def _build_heavy_update_proposal(
     router_decision: object,
     budget: MaintenanceBudget,
 ) -> HeavyUpdateProposal:
+    budget_target_pages = api.bw.ordered_unique([slug for slug, _seed_kind, _parent_slug in resolved_assignments])
     selected_targets, deferred_items = api._assemble_heavy_context(
         title=title,
         body=source_record.cleaned_text,
         router_decision=router_decision,
         loaded_pages=loaded_pages,
         budget=budget,
+        target_pages=budget_target_pages,
     )
     selected_set = set(selected_targets)
     proposal = HeavyUpdateProposal(

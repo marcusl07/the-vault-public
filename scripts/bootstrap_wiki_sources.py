@@ -339,6 +339,7 @@ def prepare_source_record(
         provenance_pointer=provenance_pointer,
         tags=tags,
         excluded_from_body=should_exclude_from_body(tags),
+        raw_content=raw_content,
     )
 
 

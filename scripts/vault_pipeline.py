@@ -131,7 +131,6 @@ class PipelineOptions:
     limit: int | None = None
     retry_failed: bool = False
     capture_root: Path = DEFAULT_CAPTURE_ROOT
-    page_resynthesis_on_touch: bool = False
 
 
 @dataclass(frozen=True)
@@ -376,18 +375,6 @@ def _source_excerpt(source: bw.SourceRecord) -> str:
     return query_impl._source_excerpt(sys.modules[__name__], source)
 
 
-def _remove_source_from_page(page: bw.Page, source_path: str) -> None:
-    query_impl._remove_source_from_page(sys.modules[__name__], page, source_path)
-
-
-def _remove_open_questions_for_fact(page: bw.Page, *, fact_key: str) -> None:
-    query_impl._remove_open_questions_for_fact(sys.modules[__name__], page, fact_key=fact_key)
-
-
-def _matching_chat_sources_for_fact(page: bw.Page, *, fact_key: str) -> list[tuple[str, dict[str, object]]]:
-    return query_impl._matching_chat_sources_for_fact(sys.modules[__name__], page, fact_key=fact_key)
-
-
 def _default_maintenance_budget(*, mode: str = "routine") -> MaintenanceBudget:
     if mode == "bootstrap":
         return MaintenanceBudget(max_candidate_pages=6, max_context_chars=9_000, max_pages_rewritten=8)
@@ -409,6 +396,7 @@ def _assemble_heavy_context(
     router_decision: RouterDecision,
     loaded_pages: dict[str, bw.Page],
     budget: MaintenanceBudget,
+    target_pages: list[str] | None = None,
 ) -> tuple[list[str], list[str]]:
     return maintenance_impl._assemble_heavy_context(
         sys.modules[__name__],
@@ -417,6 +405,7 @@ def _assemble_heavy_context(
         router_decision=router_decision,
         loaded_pages=loaded_pages,
         budget=budget,
+        target_pages=target_pages,
     )
 
 
@@ -596,54 +585,6 @@ def _route_source_update(
     return wiki_impl._route_source_update(sys.modules[__name__], title=title, body=body, page_assignments=page_assignments)
 
 
-def _build_bootstrap_page_for_touch(
-    *,
-    slug: str,
-    seed_kind: str,
-    original_title: str,
-    parsed_page: dict[str, object],
-    new_source_record: bw.SourceRecord,
-    new_note_snippet: str,
-    related_slugs: list[str],
-) -> bw.Page:
-    return wiki_impl._build_bootstrap_page_for_touch(
-        sys.modules[__name__],
-        slug=slug,
-        seed_kind=seed_kind,
-        original_title=original_title,
-        parsed_page=parsed_page,
-        new_source_record=new_source_record,
-        new_note_snippet=new_note_snippet,
-        related_slugs=related_slugs,
-    )
-
-
-def _parse_existing_page(page_path: Path) -> dict[str, object]:
-    return wiki_impl._parse_existing_page(sys.modules[__name__], page_path)
-
-
-def _render_merged_page(
-    *,
-    page_title: str,
-    summary: str,
-    note_lines: list[str],
-    connection_lines: list[str],
-    source_lines: list[str],
-) -> str:
-    return wiki_impl._render_merged_page(
-        sys.modules[__name__],
-        page_title=page_title,
-        summary=summary,
-        note_lines=note_lines,
-        connection_lines=connection_lines,
-        source_lines=source_lines,
-    )
-
-
-def _count_page_sources(page_path: Path) -> int:
-    return wiki_impl._count_page_sources(sys.modules[__name__], page_path)
-
-
 def _rewrite_index(changed_pages: list[tuple[str, str]]) -> None:
     wiki_impl._rewrite_index(sys.modules[__name__], changed_pages)
 
@@ -704,7 +645,6 @@ def _upsert_wiki_pages_for_note(
     title: str,
     body: str,
     raw_path: Path,
-    page_resynthesis_on_touch: bool = False,
     budget: MaintenanceBudget | None = None,
     mode: str = "ingest",
     write_ingest_log: bool = True,
@@ -714,7 +654,6 @@ def _upsert_wiki_pages_for_note(
         title=title,
         body=body,
         raw_path=raw_path,
-        page_resynthesis_on_touch=page_resynthesis_on_touch,
         budget=budget,
         mode=mode,
         write_ingest_log=write_ingest_log,
@@ -790,14 +729,11 @@ def search_main(argv: list[str] | None = None) -> int:
 def _default_integration_handler(
     capture_id: str,
     raw_path: Path,
-    *,
-    page_resynthesis_on_touch: bool = False,
 ) -> MaintenanceOutcome:
     return wiki_impl._default_integration_handler(
         sys.modules[__name__],
         capture_id,
         raw_path,
-        page_resynthesis_on_touch=page_resynthesis_on_touch,
     )
 
 
@@ -806,7 +742,6 @@ def ingest_raw_notes(
     *,
     integration_handler: Callable[[str, Path], None] = _default_integration_handler,
     retry_failed: bool = False,
-    page_resynthesis_on_touch: bool = False,
     debug: bool = False,
     debug_stream: TextIO | None = None,
     log_path: Path | None = None,
@@ -818,7 +753,6 @@ def ingest_raw_notes(
         items,
         integration_handler=integration_handler,
         retry_failed=retry_failed,
-        page_resynthesis_on_touch=page_resynthesis_on_touch,
         debug=debug,
         debug_stream=debug_stream,
         log_path=log_path,
@@ -840,7 +774,6 @@ def run_vault_pipeline(
     dry_run: bool = False,
     limit: int | None = None,
     retry_failed: bool = False,
-    page_resynthesis_on_touch: bool = False,
     debug_stream: TextIO | None = None,
 ) -> PipelineRunResult:
     return cli_impl.run_vault_pipeline(
@@ -850,7 +783,6 @@ def run_vault_pipeline(
         dry_run=dry_run,
         limit=limit,
         retry_failed=retry_failed,
-        page_resynthesis_on_touch=page_resynthesis_on_touch,
         debug_stream=debug_stream,
     )
 

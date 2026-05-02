@@ -24,7 +24,6 @@ class PipelinePlan:
     dry_run: bool = False
     limit: int | None = None
     retry_failed: bool = False
-    page_resynthesis_on_touch: bool = False
     debug_stream: TextIO | None = None
 
 
@@ -135,7 +134,6 @@ def discover(api: ModuleType, argv: list[str] | None = None) -> PipelinePlan:
             dry_run=args.dry_run,
             limit=args.limit,
             retry_failed=args.retry_failed,
-            page_resynthesis_on_touch=args.page_resynthesis_on_touch,
         )
     except Exception as exc:
         raise
@@ -187,7 +185,6 @@ def process(api: ModuleType, plan: PipelinePlan) -> object:
                 wiki_ingest = api.ingest_raw_notes(
                     planned_exports,
                     retry_failed=plan.retry_failed,
-                    page_resynthesis_on_touch=plan.page_resynthesis_on_touch,
                     debug=plan.debug,
                     debug_stream=plan.debug_stream,
                     dry_run=True,
@@ -198,7 +195,6 @@ def process(api: ModuleType, plan: PipelinePlan) -> object:
                 wiki_ingest = api.ingest_raw_notes(
                     capture_result["new_exports"],
                     retry_failed=plan.retry_failed,
-                    page_resynthesis_on_touch=plan.page_resynthesis_on_touch,
                     debug=plan.debug,
                     debug_stream=plan.debug_stream,
                 )
@@ -247,7 +243,6 @@ def run_vault_pipeline(
     dry_run: bool = False,
     limit: int | None = None,
     retry_failed: bool = False,
-    page_resynthesis_on_touch: bool = False,
     debug_stream: TextIO | None = None,
 ) -> object:
     return process(
@@ -258,7 +253,6 @@ def run_vault_pipeline(
             dry_run=dry_run,
             limit=limit,
             retry_failed=retry_failed,
-            page_resynthesis_on_touch=page_resynthesis_on_touch,
             debug_stream=debug_stream,
         ),
     )
@@ -312,11 +306,6 @@ def build_ingest_parser(api: ModuleType) -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="Report actions without mutating state.")
     parser.add_argument("--retry-failed", action="store_true", help="Re-run notes already marked integrated.")
     parser.add_argument(
-        "--page-resynthesis-on-touch",
-        action="store_true",
-        help="Re-synthesize touched existing wiki pages from accumulated notes and sources during ingest.",
-    )
-    parser.add_argument(
         "--items-json",
         default="-",
         help="JSON array of {capture_id, raw_path}; use '-' to read from stdin.",
@@ -333,11 +322,6 @@ def build_run_parser(api: ModuleType) -> argparse.ArgumentParser:
         "--retry-failed",
         action="store_true",
         help="Include notes whose source frontmatter has ingest_attempts >= 3.",
-    )
-    parser.add_argument(
-        "--page-resynthesis-on-touch",
-        action="store_true",
-        help="Re-synthesize touched existing wiki pages from accumulated notes and sources during ingest.",
     )
     parser.add_argument(
         "--capture-root",
@@ -368,7 +352,6 @@ def ingest_main(api: ModuleType, argv: list[str] | None = None) -> int:
     result = api.ingest_raw_notes(
         items,
         retry_failed=args.retry_failed,
-        page_resynthesis_on_touch=args.page_resynthesis_on_touch,
         debug=args.debug,
         dry_run=args.dry_run,
     )

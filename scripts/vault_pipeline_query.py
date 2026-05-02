@@ -45,7 +45,7 @@ def _matching_chat_sources_for_fact(api: ModuleType, page: object, *, fact_key: 
         if source.source_kind != "chat":
             continue
         try:
-            artifact_frontmatter = api.read_source_artifact(api._resolve_repo_relative_path(source_path)).frontmatter
+            artifact_frontmatter = api.read_source_artifact(_resolve_repo_relative_path(api, source_path)).frontmatter
         except Exception:
             continue
         if artifact_frontmatter.get("fact_key") != fact_key:
@@ -118,7 +118,7 @@ def query_writeback_chat_fact(
     superseded_source_paths: list[str] = []
     review_queued = False
     effects = api.OperationalEffects()
-    matching_sources = api._matching_chat_sources_for_fact(target_page, fact_key=fact_key)
+    matching_sources = _matching_chat_sources_for_fact(api, target_page, fact_key=fact_key)
     for existing_source_path, artifact_frontmatter in matching_sources:
         existing_note = str(artifact_frontmatter.get("target_note", "")).strip()
         if existing_note == normalized_note:
@@ -131,9 +131,9 @@ def query_writeback_chat_fact(
                 existing_note = str(artifact_frontmatter.get("target_note", "")).strip()
                 if existing_note == normalized_note:
                     continue
-                api._remove_source_from_page(target_page, existing_source_path)
+                _remove_source_from_page(api, target_page, existing_source_path)
                 superseded_source_paths.append(existing_source_path)
-            api._remove_open_questions_for_fact(target_page, fact_key=fact_key)
+            _remove_open_questions_for_fact(api, target_page, fact_key=fact_key)
             resolution_effects = api.OperationalEffects.review_resolution(reason=f"contradiction | {fact_key}", affected_pages=[target_slug])
             effects.extend(resolution_effects)
             api.apply_operational_effects(resolution_effects)

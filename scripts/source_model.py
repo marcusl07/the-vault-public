@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import InitVar, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -35,7 +35,7 @@ class SourceEvidence:
     tags: set[str] = field(default_factory=set)
     excluded_from_body: bool = False
     created_at: str | None = None
-    raw_content: InitVar[str | None] = None
+    raw_content: str | None = None
 
 
 @dataclass(frozen=True)
@@ -137,6 +137,7 @@ def source_artifact_to_evidence(
         provenance_pointer=artifact.provenance_pointer,
         tags=tags,
         excluded_from_body=should_exclude_from_body(tags),
+        raw_content=body,
     )
 
 

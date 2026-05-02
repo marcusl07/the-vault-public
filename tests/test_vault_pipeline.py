@@ -183,6 +183,7 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertEqual(evidence.external_url, "https://example.com/article")
             self.assertEqual(evidence.source_kind, "capture")
             self.assertEqual(evidence.title, "Saved Article")
+            self.assertEqual(evidence.raw_content, "A useful article.")
 
     def test_wiki_search_ranks_keyword_matches_by_relevance(self) -> None:
         with isolated_env() as (_, _, wiki_root, _):
@@ -681,6 +682,47 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertFalse((wiki_root / "isolated-note.md").exists())
             review_text = (wiki_root / "review.md").read_text(encoding="utf-8")
             self.assertIn("light-update deferred work", review_text)
+
+    def test_heavy_update_budget_selects_topic_rerouted_satellite_page(self) -> None:
+        with isolated_env() as (_, raw_root, wiki_root, _):
+            (wiki_root / "travel.md").write_text(
+                "\n".join(
+                    [
+                        "# Travel",
+                        "",
+                        "## Connections",
+                        "",
+                        "- [[packing]]",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            raw_path = raw_root / "travel-123.md"
+            raw_path.write_text(
+                vp.render_raw_file(
+                    capture_id="123",
+                    title="Travel",
+                    created_at="2026-04-24T10:00:00Z",
+                    source_file="Travel.md",
+                    body="Marcus keeps a short packing checklist for weekend trips.",
+                ),
+                encoding="utf-8",
+            )
+
+            outcome = vp._upsert_wiki_pages_for_note(
+                title="Travel",
+                body="Marcus keeps a short packing checklist for weekend trips.",
+                raw_path=raw_path,
+                budget=vp.MaintenanceBudget(max_candidate_pages=1, max_context_chars=1_200, max_pages_rewritten=4),
+            )
+
+            self.assertIn("travel-note", outcome.changed_slugs)
+            self.assertNotIn(
+                "Deferred derived page 'travel-note' because heavy-update budget was exceeded.",
+                outcome.deferred_items,
+            )
+            self.assertTrue((wiki_root / "travel-note.md").exists())
 
     def test_ingest_does_not_clone_source_body_to_folder_topic_assignment(self) -> None:
         with isolated_env() as (_, raw_root, wiki_root, _):
@@ -1590,155 +1632,6 @@ class VaultPipelineTests(unittest.TestCase):
             review_text = (wiki_root / "review.md").read_text(encoding="utf-8")
             self.assertIn("light-update deferred work", review_text)
             self.assertIn("[../raw/search-123.md]", review_text)
-
-    def test_page_resynthesis_on_touch_rewrites_existing_page_with_shared_atomic_shape(self) -> None:
-        with isolated_env() as (_, raw_root, wiki_root, _):
-            existing_page = wiki_root / "topic-a.md"
-            existing_page.write_text(
-                "\n".join(
-                    [
-                        "# Topic A",
-                        "",
-                        "## Notes",
-                        "",
-                        "- Old note about the topic.",
-                        "",
-                        "## Connections",
-                        "",
-                        "- [[existing-link]] — already connected",
-                        "",
-                        "## Sources",
-                        "",
-                        "- [Old Source](../raw/old-source.md)",
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            raw_path = raw_root / "new-note-123.md"
-            raw_path.write_text(
-                vp.render_raw_file(
-                    capture_id="123",
-                    title="Topic A",
-                    created_at="2026-04-20T17:32:00Z",
-                    source_file="Topic A.md",
-                    body="Fresh note body with new evidence for topic A.",
-                ),
-                encoding="utf-8",
-            )
-
-            result = vp.ingest_raw_notes(
-                [{"capture_id": "123", "raw_path": "raw/new-note-123.md"}],
-                page_resynthesis_on_touch=True,
-            )
-
-            self.assertEqual(result["integrated"], [{"capture_id": "123", "raw_path": "raw/new-note-123.md"}])
-            page_text = existing_page.read_text(encoding="utf-8")
-            self.assertNotIn("Old hand-written summary that should be replaced.", page_text)
-            self.assertNotIn("This page collects Marcus's notes", page_text)
-            self.assertIn("- [Old Source](../raw/old-source.md)", page_text)
-            self.assertIn("- [Topic A](../raw/new-note-123.md)", page_text)
-            self.assertIn("- [[existing-link]]", page_text)
-
-    def test_page_resynthesis_on_touch_preserves_atomic_notes_without_summary_boilerplate(self) -> None:
-        with isolated_env() as (_, raw_root, wiki_root, _):
-            existing_page = wiki_root / "topic-a.md"
-            existing_page.write_text(
-                "\n".join(
-                    [
-                        "# Topic A",
-                        "",
-                        "## Notes",
-                        "",
-                        "- Existing retained note.",
-                        "",
-                        "## Connections",
-                        "",
-                        "- [[existing-link]] — already connected",
-                        "",
-                        "## Sources",
-                        "",
-                        "- [Old Source](../raw/old-source.md)",
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            raw_path = raw_root / "new-note-123.md"
-            raw_path.write_text(
-                vp.render_raw_file(
-                    capture_id="123",
-                    title="Topic A",
-                    created_at="2026-04-20T17:32:00Z",
-                    source_file="Topic A.md",
-                    body="Fresh note body with new evidence for topic A.",
-                ),
-                encoding="utf-8",
-            )
-
-            result = vp.ingest_raw_notes(
-                [{"capture_id": "123", "raw_path": "raw/new-note-123.md"}],
-                page_resynthesis_on_touch=True,
-            )
-
-            self.assertEqual(result["integrated"], [{"capture_id": "123", "raw_path": "raw/new-note-123.md"}])
-            page_text = existing_page.read_text(encoding="utf-8")
-            self.assertIn("- Existing retained note.", page_text)
-            self.assertIn("Fresh note body with new evidence for topic A.", page_text)
-            self.assertIn("- [Old Source](../raw/old-source.md)", page_text)
-            self.assertIn("- [Topic A](../raw/new-note-123.md)", page_text)
-            self.assertNotIn("This page collects Marcus's notes", page_text)
-            self.assertNotIn("- No notes yet.", page_text)
-
-    def test_page_resynthesis_on_touch_preserves_connections_and_updates_index_log_without_mutating_raw(self) -> None:
-        with isolated_env() as (_, raw_root, wiki_root, _):
-            existing_page = wiki_root / "topic-a.md"
-            existing_page.write_text(
-                "\n".join(
-                    [
-                        "# Topic A",
-                        "",
-                        "## Notes",
-                        "",
-                        "- Existing retained note.",
-                        "",
-                        "## Connections",
-                        "",
-                        "- [[existing-link]] — already connected",
-                        "",
-                        "## Sources",
-                        "",
-                        "- [Old Source](../raw/old-source.md)",
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            raw_path = raw_root / "topic-a-123.md"
-            raw_path.write_text(
-                vp.render_raw_file(
-                    capture_id="123",
-                    title="Topic A",
-                    created_at="2026-04-20T17:32:00Z",
-                    source_file="Topic A.md",
-                    body="Fresh note body with new evidence for topic A.",
-                ),
-                encoding="utf-8",
-            )
-
-            result = vp.ingest_raw_notes(
-                [{"capture_id": "123", "raw_path": "raw/topic-a-123.md"}],
-                page_resynthesis_on_touch=True,
-            )
-
-            self.assertEqual(result["integrated"], [{"capture_id": "123", "raw_path": "raw/topic-a-123.md"}])
-            page_text = existing_page.read_text(encoding="utf-8")
-            self.assertIn("[[existing-link]]", page_text)
-            self.assertNotIn("[[unclassified-media-captures]]", page_text)
-            self.assertIn("[[topic-a]]", (wiki_root / "index.md").read_text(encoding="utf-8"))
-            self.assertIn('ingest | Capture: "Topic A"', (wiki_root / "log.md").read_text(encoding="utf-8"))
-            frontmatter, _ = vp.parse_raw_note(raw_path)
-            self.assertNotIn("integrated_at", frontmatter)
 
     def test_ingest_realizes_split_by_converting_clean_parent_to_topic(self) -> None:
         with isolated_env() as (_, raw_root, wiki_root, _):
