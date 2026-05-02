@@ -152,6 +152,9 @@ class MaintenanceOutcome:
     router_decision: RouterDecision | None = None
     review_queued: bool = False
     deferred_items: list[str] = field(default_factory=list)
+    source_path: str | None = None
+    mode: str = "ingest"
+    failed_reason: str | None = None
     effects: operations_impl.OperationalEffects = field(default_factory=operations_impl.OperationalEffects)
 
 
@@ -737,6 +740,8 @@ def _upsert_wiki_pages_for_note(
     raw_path: Path,
     page_resynthesis_on_touch: bool = False,
     budget: MaintenanceBudget | None = None,
+    mode: str = "ingest",
+    write_ingest_log: bool = True,
 ) -> MaintenanceOutcome:
     return wiki_impl._upsert_wiki_pages_for_note(
         sys.modules[__name__],
@@ -746,6 +751,24 @@ def _upsert_wiki_pages_for_note(
         raw_path=raw_path,
         page_resynthesis_on_touch=page_resynthesis_on_touch,
         budget=budget,
+        mode=mode,
+        write_ingest_log=write_ingest_log,
+    )
+
+
+def maintain_source_artifact(
+    source_path: Path,
+    *,
+    mode: str,
+    budget: MaintenanceBudget | None = None,
+    options: dict[str, object] | None = None,
+) -> MaintenanceOutcome:
+    return wiki_impl.maintain_source_artifact(
+        sys.modules[__name__],
+        source_path,
+        mode=mode,
+        budget=budget,
+        options=options,
     )
 
 

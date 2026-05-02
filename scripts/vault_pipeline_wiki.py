@@ -405,6 +405,8 @@ def _upsert_wiki_pages_for_note(
     raw_path: Path,
     page_resynthesis_on_touch: bool = False,
     budget: object | None = None,
+    mode: str = "ingest",
+    write_ingest_log: bool = True,
 ) -> object:
     _ = page_resynthesis_on_touch
     effective_budget = budget or api._default_maintenance_budget()
@@ -413,7 +415,12 @@ def _upsert_wiki_pages_for_note(
     router_decision = api._route_source_update(title=title, body=body, page_assignments=page_assignments)
     effects = api.OperationalEffects()
     if router_decision.action == "ignore":
-        return api.MaintenanceOutcome(router_decision=router_decision, effects=effects)
+        return api.MaintenanceOutcome(
+            router_decision=router_decision,
+            effects=effects,
+            source_path=api.normalize_repo_path(raw_path),
+            mode=mode,
+        )
     loaded_pages: dict[str, object] = {}
 
     def load_page(slug: str, seed_kind: str) -> object:
@@ -466,20 +473,23 @@ def _upsert_wiki_pages_for_note(
         )
         effects.extend(review_effects)
         api._rewrite_index([(slug, loaded_pages[slug].page_type) for slug in changed_slugs])
-        log_effects = api.OperationalEffects.ingest_log(
-            title,
-            date=api._today_date(),
-            router_decision=router_decision,
-            deferred_items=proposal.deferred_items,
-        )
-        effects.extend(log_effects)
-        api.apply_operational_effects(log_effects)
+        if write_ingest_log:
+            log_effects = api.OperationalEffects.ingest_log(
+                title,
+                date=api._today_date(),
+                router_decision=router_decision,
+                deferred_items=proposal.deferred_items,
+            )
+            effects.extend(log_effects)
+            api.apply_operational_effects(log_effects)
         return api.MaintenanceOutcome(
             changed_slugs=changed_slugs,
             router_decision=router_decision,
             review_queued=review_queued,
             deferred_items=proposal.deferred_items,
             effects=effects,
+            source_path=api.normalize_repo_path(raw_path),
+            mode=mode,
         )
 
     content_owner_slug = api._content_owner_slug(resolved_assignments)
@@ -547,20 +557,52 @@ def _upsert_wiki_pages_for_note(
         effects.extend(review_effects)
         api.apply_operational_effects(review_effects)
     api._rewrite_index([(slug, loaded_pages[slug].page_type) for slug in changed_slugs])
-    log_effects = api.OperationalEffects.ingest_log(
-        title,
-        date=api._today_date(),
-        router_decision=router_decision,
-        deferred_items=deferred_items,
-    )
-    effects.extend(log_effects)
-    api.apply_operational_effects(log_effects)
+    if write_ingest_log:
+        log_effects = api.OperationalEffects.ingest_log(
+            title,
+            date=api._today_date(),
+            router_decision=router_decision,
+            deferred_items=deferred_items,
+        )
+        effects.extend(log_effects)
+        api.apply_operational_effects(log_effects)
     return api.MaintenanceOutcome(
         changed_slugs=changed_slugs,
         router_decision=router_decision,
         review_queued=review_queued,
         deferred_items=deferred_items,
         effects=effects,
+        source_path=api.normalize_repo_path(raw_path),
+        mode=mode,
+    )
+
+
+def maintain_source_artifact(
+    api: ModuleType,
+    source_path: Path,
+    *,
+    mode: str,
+    budget: object | None = None,
+    options: dict[str, object] | None = None,
+) -> object:
+    if mode not in {"ingest", "bootstrap"}:
+        raise ValueError(f"unsupported maintenance mode: {mode}")
+    options = options or {}
+    artifact = api.read_source_artifact(source_path)
+    if not artifact.title:
+        raise ValueError(f"source artifact missing title: {source_path}")
+    body = api.bw.content_body(artifact)
+    effective_budget = budget or api._default_maintenance_budget(mode=mode if mode == "bootstrap" else "routine")
+    write_ingest_log = bool(options.get("write_ingest_log", mode == "ingest"))
+    return api._upsert_wiki_pages_for_note(
+        frontmatter=artifact.frontmatter,
+        title=artifact.title,
+        body=body,
+        raw_path=source_path,
+        page_resynthesis_on_touch=bool(options.get("page_resynthesis_on_touch", False)),
+        budget=effective_budget,
+        mode=mode,
+        write_ingest_log=write_ingest_log,
     )
 
 
@@ -583,22 +625,25 @@ def bootstrap_integrate_sources(
     changed_slugs: set[str] = set()
     failed_sources: list[str] = []
     processed_sources = 0
+    deferred_count = 0
+    review_count = 0
 
     for source_path in selected_paths:
-        frontmatter, title, body = api._read_raw_note(source_path)
         try:
-            outcome = api._upsert_wiki_pages_for_note(
-                frontmatter=frontmatter,
-                title=title,
-                body=body,
-                raw_path=source_path,
+            outcome = api.maintain_source_artifact(
+                source_path,
+                mode="bootstrap",
                 budget=effective_budget,
+                options={"write_ingest_log": False},
             )
         except Exception:
             failed_sources.append(api.normalize_repo_path(source_path))
             continue
         processed_sources += 1
         changed_slugs.update(outcome.changed_slugs)
+        deferred_count += len(outcome.deferred_items)
+        if outcome.review_queued:
+            review_count += 1
 
     if selected_paths:
         api.apply_operational_effects(api.OperationalEffects.bootstrap_log(
@@ -612,6 +657,8 @@ def bootstrap_integrate_sources(
         "processed_sources": processed_sources,
         "changed_slugs": sorted(changed_slugs),
         "failed_sources": failed_sources,
+        "deferred_count": deferred_count,
+        "review_count": review_count,
     }
 
 
@@ -623,13 +670,10 @@ def _default_integration_handler(
     page_resynthesis_on_touch: bool = False,
 ) -> object:
     _ = capture_id
-    frontmatter, title, body = api._read_raw_note(raw_path)
-    return api._upsert_wiki_pages_for_note(
-        frontmatter=frontmatter,
-        title=title,
-        body=body,
-        raw_path=raw_path,
-        page_resynthesis_on_touch=page_resynthesis_on_touch,
+    return api.maintain_source_artifact(
+        raw_path,
+        mode="ingest",
+        options={"page_resynthesis_on_touch": page_resynthesis_on_touch},
     )
 
 

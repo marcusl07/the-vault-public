@@ -600,7 +600,62 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertIn("Marcus prefers a broader bootstrap budget for first-pass integration.", page_text)
             log_text = (wiki_root / "log.md").read_text(encoding="utf-8")
             self.assertIn("bootstrap | pipeline", log_text)
-            self.assertIn('ingest | Capture: "Budgeted Note" | Router: heavy_update', log_text)
+            self.assertNotIn('ingest | Capture: "Budgeted Note" | Router: heavy_update', log_text)
+
+    def test_maintain_source_artifact_ingest_uses_shared_engine(self) -> None:
+        with isolated_env() as (_, raw_root, wiki_root, _):
+            raw_path = raw_root / "shared-engine" / "coffee-note-123.md"
+            raw_path.parent.mkdir(parents=True)
+            raw_path.write_text(
+                vp.render_note(
+                    {
+                        "capture_id": "123",
+                        "source_kind": "capture",
+                        "source_id": "capture:123",
+                        "title": "Coffee Note",
+                        "created_at": "2026-04-24T10:00:00Z",
+                        "source_file": "Coffee Note.md",
+                    },
+                    "# Coffee Note\n\nMarcus keeps coffee notes in the shared maintenance engine.",
+                ),
+                encoding="utf-8",
+            )
+
+            outcome = vp.maintain_source_artifact(raw_path, mode="ingest")
+
+            self.assertEqual(outcome.mode, "ingest")
+            self.assertEqual(outcome.source_path, "raw/shared-engine/coffee-note-123.md")
+            self.assertIn("coffee-note", outcome.changed_slugs)
+            self.assertTrue((wiki_root / "coffee-note.md").exists())
+            self.assertIn('ingest | Capture: "Coffee Note"', (wiki_root / "log.md").read_text(encoding="utf-8"))
+
+    def test_bootstrap_integration_continues_after_invalid_source_artifact(self) -> None:
+        with isolated_env() as (_, raw_root, wiki_root, _):
+            bad_path = raw_root / "bad-note.md"
+            bad_path.write_text("# Bad Note\n\nMissing source frontmatter.", encoding="utf-8")
+            good_path = raw_root / "nested" / "good-note-123.md"
+            good_path.parent.mkdir(parents=True)
+            good_path.write_text(
+                vp.render_note(
+                    {
+                        "capture_id": "123",
+                        "source_kind": "capture",
+                        "source_id": "capture:123",
+                        "title": "Good Note",
+                        "created_at": "2026-04-24T10:00:00Z",
+                        "source_file": "Good Note.md",
+                    },
+                    "# Good Note\n\nA valid source still processes after a failed source.",
+                ),
+                encoding="utf-8",
+            )
+
+            result = vp.bootstrap_integrate_sources(source_paths=[bad_path, good_path])
+
+            self.assertEqual(result["processed_sources"], 1)
+            self.assertEqual(result["failed_sources"], ["raw/bad-note.md"])
+            self.assertIn("good-note", result["changed_slugs"])
+            self.assertTrue((wiki_root / "good-note.md").exists())
 
     def test_light_update_defers_new_atomic_page_without_outbound_links(self) -> None:
         with isolated_env() as (_, raw_root, wiki_root, _):
