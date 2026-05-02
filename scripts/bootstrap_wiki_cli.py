@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import Counter
+import argparse
 import os
 import sys
 from typing import TYPE_CHECKING
@@ -87,7 +89,7 @@ def run_split_only(api: ModuleType, *, api_key: str | None, model: str, target_s
 
 
 def main(api: ModuleType) -> None:
-    parser = api.argparse.ArgumentParser()
+    parser = argparse.ArgumentParser()
     parser.add_argument("--fetch-urls", action="store_true", help="Fetch remote title/meta for URL notes.")
     parser.add_argument("--only-youtube", action="store_true", help="Process only raw markdown notes containing YouTube URLs.")
     parser.add_argument("--split-only", action="store_true", help="Retry page splitting using the existing wiki only.")
@@ -128,7 +130,7 @@ def main(api: ModuleType) -> None:
         )
 
     embedded_media = set()
-    url_stats = api.Counter()
+    url_stats = Counter()
     api.update_manifest(
         phase="notes",
         total_notes=len(markdown_files),

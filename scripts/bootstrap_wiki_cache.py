@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from pathlib import Path
+import hashlib
 import json
 import shutil
 from typing import TYPE_CHECKING
@@ -15,11 +16,11 @@ def stable_json_dumps(api: ModuleType, payload: object) -> str:
 
 
 def fingerprint_payload(api: ModuleType, payload: object) -> str:
-    return api.hashlib.sha256(stable_json_dumps(api, payload).encode("utf-8")).hexdigest()
+    return hashlib.sha256(stable_json_dumps(api, payload).encode("utf-8")).hexdigest()
 
 
 def cache_key(api: ModuleType, value: str) -> str:
-    return api.hashlib.sha1(value.encode("utf-8")).hexdigest()
+    return hashlib.sha1(value.encode("utf-8")).hexdigest()
 
 
 def atomic_write_json(api: ModuleType, path: Path, payload: object) -> None:
