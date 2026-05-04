@@ -27,8 +27,14 @@ DEFAULT_EXCLUDES = {
     "AGENTS.md",
 }
 
+DEFAULT_EXCLUDED_FILES = {
+    Path("docs/wiki_duplicate_notes_report.md"),
+}
+
 
 def should_skip(path: Path) -> bool:
+    if path in DEFAULT_EXCLUDED_FILES:
+        return True
     parts = set(path.parts)
     return any(part in DEFAULT_EXCLUDES for part in parts)
 
