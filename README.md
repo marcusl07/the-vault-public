@@ -21,6 +21,7 @@ The Zettelkasten part is the shape of the wiki itself: small notes, one idea at 
 - The system updates existing wiki pages when a note sharpens an idea.
 - It creates new atomic pages when a source introduces a genuinely reusable concept.
 - It maintains links, navigation pages, and a chronological log as the wiki evolves.
+- I query the wiki through Codex, which reads the maintained pages first instead of searching the web or re-summarizing everything from scratch.
 
 ## Why
 
