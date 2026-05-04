@@ -30,3 +30,26 @@ Most note systems make it easy to save things and hard to make them useful later
 The Vault is meant to sit between those two extremes. It keeps the original note-taking flow lightweight, then uses an LLM to do the maintenance work that makes a wiki valuable over time: synthesis, connection, contradiction tracking, and cleanup.
 
 The goal is not a perfect archive. The goal is a living knowledge base that gets more coherent each time it is used.
+
+## Example Note
+
+```md
+# Moka Pot
+
+## Notes
+
+- Put boiling water in the base.
+- Fill the coffee basket completely.
+- Keep the lid open during brewing.
+- Use a low flame.
+- Remove the liquid as soon as possible.
+- Cool the pot under tap water to avoid sputtering.
+
+## Connections
+
+- [[italian-coffee]]
+- [[coffee-brewing]]
+- [[espresso]]
+- [[james-hoffmann]]
+- [[food]]
+```
