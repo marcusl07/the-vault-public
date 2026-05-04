@@ -47,7 +47,7 @@ WIKI_ROOT = ROOT / "wiki"
 JSONL_LOG_PATH = ROOT / "log.jsonl"
 STATE_EVENTS_PATH = ROOT / "state" / "events.jsonl"
 DEFAULT_CAPTURE_ROOT = Path(
-    "capture"
+    os.environ.get("VAULT_CAPTURE_ROOT", ROOT / "capture")
 )
 
 MARKER_PREFIX = "✓ "
