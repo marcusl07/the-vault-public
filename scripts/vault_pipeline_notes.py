@@ -194,7 +194,7 @@ def latest_state_record(item_id: str, state_path: Path) -> dict[str, object] | N
         payload = json.loads(line)
         if payload.get("item_id") != item_id:
             continue
-        if payload.get("event") in {"processed", "skipped", "updated", "failed"}:
+        if payload.get("event") in {"processed", "skipped", "updated", "failed", "deferred"}:
             latest = payload
     return latest
 
@@ -222,7 +222,7 @@ def latest_ingest_event(*, capture_id: str, raw_path: str, log_path: Path) -> st
         if payload.get("capture_id") != capture_id or payload.get("raw_path") != raw_path:
             continue
         event = payload.get("event")
-        if event in {"integrated", "integrate_failed"}:
+        if event in {"integrated", "integrate_failed", "integrate_deferred"}:
             latest_event = str(event)
     return latest_event
 

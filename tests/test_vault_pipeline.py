@@ -1295,7 +1295,7 @@ class VaultPipelineTests(unittest.TestCase):
             events = [json.loads(line) for line in vp.JSONL_LOG_PATH.read_text(encoding="utf-8").splitlines()]
             self.assertTrue(any(event["event"] == "created_at_mtime_fallback" for event in events))
 
-    def test_ingest_raw_notes_updates_wiki_and_marks_integrated(self) -> None:
+    def test_ingest_raw_notes_defers_review_only_wiki_write(self) -> None:
         with isolated_env() as (_, raw_root, wiki_root, _):
             raw_path = raw_root / "note-123.md"
             raw_path.write_text(
@@ -1311,14 +1311,15 @@ class VaultPipelineTests(unittest.TestCase):
 
             result = vp.ingest_raw_notes([{"capture_id": "123", "raw_path": "raw/note-123.md"}])
 
-            self.assertEqual(result["integrated"], [{"capture_id": "123", "raw_path": "raw/note-123.md"}])
+            self.assertEqual(result["integrated"], [])
+            self.assertEqual(result["deferred"], [{"capture_id": "123", "raw_path": "raw/note-123.md"}])
             frontmatter, _ = vp.parse_raw_note(raw_path)
             self.assertNotIn("integrated_at", frontmatter)
             self.assertFalse((wiki_root / "note-1.md").exists())
             self.assertIn('ingest | Capture: "Note 1" | Router: heavy_update | Deferred: 1', (wiki_root / "log.md").read_text(encoding="utf-8"))
             self.assertIn("light-update deferred work", (wiki_root / "review.md").read_text(encoding="utf-8"))
             event = json.loads(vp.JSONL_LOG_PATH.read_text(encoding="utf-8").splitlines()[0])
-            self.assertEqual(event["event"], "integrated")
+            self.assertEqual(event["event"], "integrate_deferred")
 
     def test_ingest_raw_notes_skips_when_latest_event_is_integrated(self) -> None:
         with isolated_env() as (_, raw_root, _, _):
@@ -1339,6 +1340,41 @@ class VaultPipelineTests(unittest.TestCase):
 
             self.assertEqual(result["integrated"], [])
             self.assertEqual(result["skipped"], [{"capture_id": "123", "raw_path": "raw/note-123.md"}])
+
+    def test_default_assignments_prefer_specific_existing_page_over_title_slug(self) -> None:
+        with isolated_env() as (_, raw_root, wiki_root, _):
+            (wiki_root / "chipotle.md").write_text("# Chipotle\n\n## Connections\n\n- [[food]]\n", encoding="utf-8")
+            (wiki_root / "food.md").write_text("# Food\n\n## Connections\n\n- [[chipotle]]\n", encoding="utf-8")
+            raw_path = raw_root / "chipotle-honey-chicken.md"
+
+            assignments = vp._build_default_page_assignments(
+                "Chipotle honey chicken is pretty good",
+                "Chipotle food note.",
+                raw_path,
+            )
+
+            self.assertEqual(assignments[0], ("chipotle", "existing"))
+            self.assertIn(("food", "existing"), assignments)
+            self.assertNotIn(("chipotle-honey-chicken-is-pretty-good", "title"), assignments)
+
+    def test_default_assignments_resolve_dutch_baby_existing_page(self) -> None:
+        with isolated_env() as (_, raw_root, wiki_root, _):
+            (wiki_root / "dutch-baby.md").write_text("# Dutch Baby\n\n## Connections\n\n- [[food]]\n", encoding="utf-8")
+            (wiki_root / "sydney.md").write_text("# Sydney\n\n## Connections\n\n- [[dutch-baby]]\n", encoding="utf-8")
+            raw_path = raw_root / "make-dutch-baby-for-sydney.md"
+
+            assignments = vp._build_default_page_assignments("Make Dutch baby for sydney", "", raw_path)
+
+            self.assertEqual(assignments, [("dutch-baby", "existing")])
+
+    def test_default_assignments_fall_back_to_title_slug_without_existing_match(self) -> None:
+        with isolated_env() as (_, raw_root, wiki_root, _):
+            (wiki_root / "chipotle.md").write_text("# Chipotle\n\n## Connections\n\n- [[food]]\n", encoding="utf-8")
+            raw_path = raw_root / "brand-new-idea.md"
+
+            assignments = vp._build_default_page_assignments("Brand new idea", "No matching page.", raw_path)
+
+            self.assertEqual(assignments, [("brand-new-idea", "title")])
 
     def test_ingest_raw_notes_writes_append_only_state_and_skips_unchanged_content(self) -> None:
         with isolated_env() as (_, raw_root, _, _):
@@ -1491,6 +1527,69 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertEqual(failed_event["stage"], "wiki_ingest")
             self.assertEqual(failed_event["error_summary"], "temporary wiki failure")
 
+    def test_ingest_raw_notes_deferred_only_outcome_is_retryable(self) -> None:
+        with isolated_env() as (_, raw_root, _, _):
+            raw_path = raw_root / "note-123.md"
+            raw_path.write_text(
+                vp.render_raw_file(
+                    capture_id="123",
+                    title="Note 1",
+                    created_at="2026-04-20T17:32:00Z",
+                    source_file="Note 1.md",
+                    body="Stable body.",
+                ),
+                encoding="utf-8",
+            )
+            attempts: list[str] = []
+
+            def handler(capture_id: str, path: Path) -> vp.MaintenanceOutcome:
+                attempts.append(capture_id)
+                return vp.MaintenanceOutcome(review_queued=True, changed_slugs=[])
+
+            first = vp.ingest_raw_notes(
+                [{"capture_id": "123", "raw_path": "raw/note-123.md"}],
+                integration_handler=handler,
+            )
+            second = vp.ingest_raw_notes(
+                [{"capture_id": "123", "raw_path": "raw/note-123.md"}],
+                integration_handler=handler,
+            )
+
+            self.assertEqual(first["deferred"], [{"capture_id": "123", "raw_path": "raw/note-123.md"}])
+            self.assertEqual(first["integrated"], [])
+            self.assertEqual(second["deferred"], [{"capture_id": "123", "raw_path": "raw/note-123.md"}])
+            self.assertEqual(attempts, ["123", "123"])
+            log_events = [json.loads(line) for line in vp.JSONL_LOG_PATH.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([event["event"] for event in log_events], ["integrate_deferred", "integrate_deferred"])
+            state_events = [json.loads(line) for line in vp.STATE_EVENTS_PATH.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([event["event"] for event in state_events], ["discovered", "deferred", "deferred"])
+
+    def test_ingest_raw_notes_successful_outcome_still_marks_integrated_and_processed(self) -> None:
+        with isolated_env() as (_, raw_root, _, _):
+            raw_path = raw_root / "note-123.md"
+            raw_path.write_text(
+                vp.render_raw_file(
+                    capture_id="123",
+                    title="Note 1",
+                    created_at="2026-04-20T17:32:00Z",
+                    source_file="Note 1.md",
+                    body="Stable body.",
+                ),
+                encoding="utf-8",
+            )
+
+            result = vp.ingest_raw_notes(
+                [{"capture_id": "123", "raw_path": "raw/note-123.md"}],
+                integration_handler=lambda _capture_id, _path: vp.MaintenanceOutcome(changed_slugs=["note-1"]),
+            )
+
+            self.assertEqual(result["integrated"], [{"capture_id": "123", "raw_path": "raw/note-123.md"}])
+            self.assertEqual(result["deferred"], [])
+            log_event = json.loads(vp.JSONL_LOG_PATH.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(log_event["event"], "integrated")
+            state_events = [json.loads(line) for line in vp.STATE_EVENTS_PATH.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([event["event"] for event in state_events], ["discovered", "processed"])
+
     def test_ingest_reuses_single_raw_source_across_grounded_split_children(self) -> None:
         with isolated_env() as (_, raw_root, wiki_root, _):
             raw_path = raw_root / "ics33-week1.md"
@@ -1577,7 +1676,8 @@ class VaultPipelineTests(unittest.TestCase):
                 with mock.patch.object(vp.bw, "analyze_page_for_atomic_split", return_value=decision):
                     result = vp.ingest_raw_notes([{"capture_id": "123", "raw_path": "raw/recipe-list.md"}])
 
-            self.assertEqual(result["integrated"], [{"capture_id": "123", "raw_path": "raw/recipe-list.md"}])
+            self.assertEqual(result["integrated"], [])
+            self.assertEqual(result["deferred"], [{"capture_id": "123", "raw_path": "raw/recipe-list.md"}])
             self.assertFalse((wiki_root / "soba-noodles.md").exists())
             self.assertFalse((wiki_root / "ponzu-sauce.md").exists())
 
@@ -1602,7 +1702,8 @@ class VaultPipelineTests(unittest.TestCase):
             ) as fetch_mock:
                 result = vp.ingest_raw_notes([{"capture_id": "123", "raw_path": "raw/chocolate-cake-123.md"}])
 
-            self.assertEqual(result["integrated"], [{"capture_id": "123", "raw_path": "raw/chocolate-cake-123.md"}])
+            self.assertEqual(result["integrated"], [])
+            self.assertEqual(result["deferred"], [{"capture_id": "123", "raw_path": "raw/chocolate-cake-123.md"}])
             fetch_mock.assert_called_once_with("https://example.com/cake")
             self.assertFalse((wiki_root / "chocolate-cake.md").exists())
             review_text = (wiki_root / "review.md").read_text(encoding="utf-8")
@@ -1626,7 +1727,8 @@ class VaultPipelineTests(unittest.TestCase):
             with mock.patch.object(vp.bw, "fetch_url_summary") as fetch_mock:
                 result = vp.ingest_raw_notes([{"capture_id": "123", "raw_path": "raw/search-123.md"}])
 
-            self.assertEqual(result["integrated"], [{"capture_id": "123", "raw_path": "raw/search-123.md"}])
+            self.assertEqual(result["integrated"], [])
+            self.assertEqual(result["deferred"], [{"capture_id": "123", "raw_path": "raw/search-123.md"}])
             fetch_mock.assert_not_called()
             self.assertFalse((wiki_root / "cake-search.md").exists())
             review_text = (wiki_root / "review.md").read_text(encoding="utf-8")
@@ -1788,7 +1890,7 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertIn("[[running-form]]", parent_text)
             self.assertIn("[[running-plan]]", parent_text)
 
-    def test_run_vault_pipeline_integrates_blank_body_meaningful_title_note(self) -> None:
+    def test_run_vault_pipeline_defers_blank_body_meaningful_title_note(self) -> None:
         with isolated_env() as (_, raw_root, wiki_root, capture_root):
             note_path = capture_root / "i like eating grapes.md"
             write_note(note_path, "\n \t\n")
@@ -1796,7 +1898,8 @@ class VaultPipelineTests(unittest.TestCase):
             result = vp.run_vault_pipeline(capture_root=capture_root)
 
             self.assertEqual(len(result["capture_ingest"]["new_exports"]), 1)
-            self.assertEqual(result["wiki_ingest"]["integrated"], result["capture_ingest"]["new_exports"])
+            self.assertEqual(result["wiki_ingest"]["integrated"], [])
+            self.assertEqual(result["wiki_ingest"]["deferred"], result["capture_ingest"]["new_exports"])
             self.assertFalse(note_path.exists())
             self.assertTrue((capture_root / "✓ i like eating grapes.md").exists())
 
@@ -1814,7 +1917,7 @@ class VaultPipelineTests(unittest.TestCase):
 
             events = [json.loads(line) for line in vp.JSONL_LOG_PATH.read_text(encoding="utf-8").splitlines()]
             domain_events = [event["event"] for event in events if event["event"] != "pipeline_stage"]
-            self.assertEqual(domain_events, ["discovered", "exported_to_raw", "marked_processed", "integrated"])
+            self.assertEqual(domain_events, ["discovered", "exported_to_raw", "marked_processed", "integrate_deferred"])
             stage_events = [
                 (event["stage"], event["status"])
                 for event in events

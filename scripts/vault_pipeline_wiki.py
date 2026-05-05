@@ -70,6 +70,73 @@ def _derive_path_topics(api: ModuleType, path: Path) -> list[str]:
     return topics
 
 
+def _wiki_system_slugs(api: ModuleType) -> set[str]:
+    return {"index", "log", "review", Path(api.bw.CATALOG_PATH).stem}
+
+
+def _tokenize_for_existing_match(api: ModuleType, text: str) -> list[str]:
+    return api.re.findall(r"[a-z0-9]+", text.lower())
+
+
+def _contains_token_phrase(haystack: list[str], needle: list[str]) -> bool:
+    if not needle or len(needle) > len(haystack):
+        return False
+    needle_len = len(needle)
+    return any(haystack[index : index + needle_len] == needle for index in range(len(haystack) - needle_len + 1))
+
+
+def _existing_page_title(api: ModuleType, page_path: Path) -> str:
+    try:
+        for line in page_path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("# "):
+                return line[2:].strip()
+    except OSError:
+        return api.bw.page_title(page_path.stem)
+    return api.bw.page_title(page_path.stem)
+
+
+def _existing_page_matches(api: ModuleType, title: str, body: str) -> list[str]:
+    capture_tokens = api._tokenize_for_existing_match(f"{title}\n{body}")
+    if not capture_tokens or not api.WIKI_ROOT.exists():
+        return []
+
+    generic_slugs = {
+        "food",
+        "foods",
+        "recipe",
+        "recipes",
+        "mexican-food",
+    }
+    matches: list[tuple[int, int, int, str]] = []
+    for page_path in api.WIKI_ROOT.glob("*.md"):
+        slug = page_path.stem
+        if slug in api._wiki_system_slugs():
+            continue
+        phrase_options = [
+            api._tokenize_for_existing_match(slug.replace("-", " ")),
+            api._tokenize_for_existing_match(api._existing_page_title(page_path)),
+        ]
+        phrase_tokens = max(phrase_options, key=lambda tokens: (len(tokens), sum(len(token) for token in tokens)), default=[])
+        if not phrase_tokens or not api._contains_token_phrase(capture_tokens, phrase_tokens):
+            continue
+        generic_penalty = 1 if slug in generic_slugs else 0
+        matches.append(
+            (
+                generic_penalty,
+                -len(phrase_tokens),
+                -sum(len(token) for token in phrase_tokens),
+                slug,
+            )
+        )
+    if any(generic_penalty == 0 and -token_count > 1 for generic_penalty, token_count, _char_count, _slug in matches):
+        matches = [
+            match
+            for match in matches
+            if match[0] == 1 or -match[1] > 1
+        ]
+    return [slug for _generic_penalty, _token_count, _char_count, slug in sorted(matches)]
+
+
 def _build_default_page_assignments(api: ModuleType, title: str, body: str, raw_abspath: Path) -> list[tuple[str, str]]:
     url = api.bw.extract_first_url(body)
     path_topics = api._derive_path_topics(raw_abspath)
@@ -80,9 +147,15 @@ def _build_default_page_assignments(api: ModuleType, title: str, body: str, raw_
     if api.bw.should_fold_note_into_parent(title, body, url) and path_topics:
         return [(path_topics[0], "folder")]
 
+    for existing_slug in api._existing_page_matches(title, body):
+        if existing_slug not in seen:
+            assignments.append((existing_slug, "existing"))
+            seen.add(existing_slug)
+
     if title_slug and title_slug != "new-note" and not api.is_placeholder_title(title):
-        assignments.append((title_slug, "title"))
-        seen.add(title_slug)
+        if not assignments and title_slug not in seen:
+            assignments.append((title_slug, "title"))
+            seen.add(title_slug)
 
     for topic in path_topics[:2]:
         if topic not in seen:
@@ -97,7 +170,7 @@ def _build_default_page_assignments(api: ModuleType, title: str, body: str, raw_
 def _content_owner_slug(api: ModuleType, assignments: list[tuple[str, str, str | None]]) -> str | None:
     if not assignments:
         return None
-    for preferred_seed_kind in ("title", "model", "query"):
+    for preferred_seed_kind in ("existing", "title", "model", "query"):
         for slug, seed_kind, _parent_slug in assignments:
             if seed_kind == preferred_seed_kind:
                 return slug
@@ -320,18 +393,39 @@ def _upsert_wiki_pages_for_note(
         loaded_pages[slug] = page
         return page
 
+    primary_existing_owner: tuple[str, str] | None = None
+    for slug, seed_kind in page_assignments:
+        page = load_page(slug, seed_kind)
+        if seed_kind == "existing" and api.bw.page_shape(page) != api.bw.PAGE_SHAPE_TOPIC:
+            primary_existing_owner = (slug, seed_kind)
+            break
+
     resolved_assignments: list[tuple[str, str, str | None]] = []
+    seen_resolved: set[tuple[str, str | None]] = set()
     for slug, seed_kind in page_assignments:
         page = load_page(slug, seed_kind)
         if api.bw.page_shape(page) == api.bw.PAGE_SHAPE_TOPIC:
+            if seed_kind == "existing" and primary_existing_owner is not None:
+                owner_slug, owner_seed_kind = primary_existing_owner
+                key = (owner_slug, slug)
+                if key not in seen_resolved:
+                    resolved_assignments.append((owner_slug, owner_seed_kind, slug))
+                    seen_resolved.add(key)
+                continue
             satellite_slug = api.bw.clean_component(title) or api.bw.slugify(title) or f"{slug}-note"
             if satellite_slug == slug:
                 satellite_slug = f"{slug}-note"
             satellite_page = load_page(satellite_slug, seed_kind)
             satellite_page.topic_parent = slug
-            resolved_assignments.append((satellite_slug, seed_kind, slug))
+            key = (satellite_slug, slug)
+            if key not in seen_resolved:
+                resolved_assignments.append((satellite_slug, seed_kind, slug))
+                seen_resolved.add(key)
         else:
-            resolved_assignments.append((slug, seed_kind, None))
+            key = (slug, None)
+            if key not in seen_resolved:
+                resolved_assignments.append((slug, seed_kind, None))
+                seen_resolved.add(key)
 
     if not resolved_assignments:
         fallback_slug = api.bw.clean_component(title) or api.bw.slugify(title) or "uncategorized-captures"
@@ -577,7 +671,16 @@ def ingest_raw_notes(
     active_handler = integration_handler or api._default_integration_handler
     if dry_run:
         effects = api.OperationalEffects()
-        result = {"integrated": [], "skipped": [], "failed": [], "discovered": [], "updated": [], "processed": [], "failed_risk": []}
+        result = {
+            "integrated": [],
+            "skipped": [],
+            "failed": [],
+            "deferred": [],
+            "discovered": [],
+            "updated": [],
+            "processed": [],
+            "failed_risk": [],
+        }
         for raw_item in items:
             try:
                 item = api._normalize_ingest_item(raw_item)
@@ -643,7 +746,7 @@ def ingest_raw_notes(
 
     validated = api.validate_ingest_inputs(items)
     effects = api.OperationalEffects()
-    result = {"integrated": [], "skipped": [], "failed": []}
+    result = {"integrated": [], "skipped": [], "failed": [], "deferred": []}
 
     for item in validated:
         raw_abspath = api.ROOT / item["raw_path"]
@@ -690,8 +793,13 @@ def ingest_raw_notes(
                 handler_effects = getattr(handler_result, "effects", None)
                 if handler_effects is not None:
                     effects.extend(handler_effects)
+                deferred_only = (
+                    bool(getattr(handler_result, "review_queued", False))
+                    and not getattr(handler_result, "changed_slugs", [])
+                )
+                jsonl_event = "integrate_deferred" if deferred_only else "integrated"
                 jsonl_effects = api.OperationalEffects.jsonl_event(
-                    {"event": "integrated", "capture_id": item["capture_id"], "raw_path": item["raw_path"]}
+                    {"event": jsonl_event, "capture_id": item["capture_id"], "raw_path": item["raw_path"]}
                 )
                 effects.extend(jsonl_effects)
                 api.apply_operational_effects(jsonl_effects, log_path=log_path)
@@ -699,11 +807,16 @@ def ingest_raw_notes(
                     state_effects = api.OperationalEffects.state_event({"event": "updated", **state_payload})
                     effects.extend(state_effects)
                     api.apply_operational_effects(state_effects, state_path=state_path)
-                state_effects = api.OperationalEffects.state_event({"event": "processed", **state_payload})
+                state_event = "deferred" if deferred_only else "processed"
+                state_effects = api.OperationalEffects.state_event({"event": state_event, **state_payload})
                 effects.extend(state_effects)
                 api.apply_operational_effects(state_effects, state_path=state_path)
-                api.debug_print(f"Integrated {item['capture_id']}", enabled=debug, stream=debug_stream)
-                result["integrated"].append(item)
+                if deferred_only:
+                    api.debug_print(f"Deferred {item['capture_id']}", enabled=debug, stream=debug_stream)
+                    result["deferred"].append(item)
+                else:
+                    api.debug_print(f"Integrated {item['capture_id']}", enabled=debug, stream=debug_stream)
+                    result["integrated"].append(item)
                 last_error = None
                 break
             except Exception as exc:

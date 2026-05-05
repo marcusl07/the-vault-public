@@ -203,6 +203,7 @@ def process(api: ModuleType, plan: PipelinePlan) -> object:
                     "wiki_ingest",
                     "end",
                     integrated=len(wiki_ingest["integrated"]),
+                    deferred=len(wiki_ingest["deferred"]),
                     skipped=len(wiki_ingest["skipped"]),
                     failed=len(wiki_ingest["failed"]),
                 )
@@ -269,7 +270,7 @@ def pipeline_run_has_output(result: object) -> bool:
 
     wiki_result = result.get("wiki_ingest")
     if isinstance(wiki_result, dict):
-        if wiki_result.get("integrated") or wiki_result.get("skipped") or wiki_result.get("failed"):
+        if wiki_result.get("integrated") or wiki_result.get("deferred") or wiki_result.get("skipped") or wiki_result.get("failed"):
             return True
         if wiki_result.get("discovered") or wiki_result.get("updated") or wiki_result.get("processed") or wiki_result.get("failed_risk"):
             return True

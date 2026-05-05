@@ -47,7 +47,10 @@ WIKI_ROOT = ROOT / "wiki"
 JSONL_LOG_PATH = ROOT / "log.jsonl"
 STATE_EVENTS_PATH = ROOT / "state" / "events.jsonl"
 DEFAULT_CAPTURE_ROOT = Path(
-    os.environ.get("VAULT_CAPTURE_ROOT", ROOT / "capture")
+    os.environ.get(
+        "VAULT_CAPTURE_ROOT",
+        "/Users/marcuslo/Library/Mobile Documents/iCloud~md~obsidian/Documents/The vault input",
+    )
 )
 
 MARKER_PREFIX = "✓ "
@@ -538,6 +541,26 @@ def _read_raw_note(path: Path) -> tuple[dict[str, object], str, str]:
 
 def _derive_path_topics(path: Path) -> list[str]:
     return wiki_impl._derive_path_topics(sys.modules[__name__], path)
+
+
+def _wiki_system_slugs() -> set[str]:
+    return wiki_impl._wiki_system_slugs(sys.modules[__name__])
+
+
+def _tokenize_for_existing_match(text: str) -> list[str]:
+    return wiki_impl._tokenize_for_existing_match(sys.modules[__name__], text)
+
+
+def _contains_token_phrase(haystack: list[str], needle: list[str]) -> bool:
+    return wiki_impl._contains_token_phrase(haystack, needle)
+
+
+def _existing_page_title(page_path: Path) -> str:
+    return wiki_impl._existing_page_title(sys.modules[__name__], page_path)
+
+
+def _existing_page_matches(title: str, body: str) -> list[str]:
+    return wiki_impl._existing_page_matches(sys.modules[__name__], title, body)
 
 
 def _build_default_page_assignments(title: str, body: str, raw_abspath: Path) -> list[tuple[str, str]]:
