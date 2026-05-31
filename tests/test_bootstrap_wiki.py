@@ -67,6 +67,30 @@ class BootstrapWikiTests(unittest.TestCase):
         self.assertIn("## Open Questions", rendered)
         self.assertIn("- Is this still true when traveling?", rendered)
 
+    def test_render_page_prefers_fetched_summary_for_single_source_pages(self) -> None:
+        page = bw.Page(
+            slug="raycast-com",
+            title="Raycast.com",
+            page_type="Concepts",
+            summary_hint="Raycast.com",
+        )
+        page.notes = ["Raycast is saved as a tool/site reference."]
+        page.sources["../raw/raycast-com.md"] = bw.SourceRecord(
+            label="Raycast.com",
+            path="../raw/raycast-com.md",
+            status="fetched",
+            raw_content="",
+            cleaned_text="Raycast is saved as a tool/site reference.",
+            fetched_summary="Raycast - Your shortcut to everything.",
+            detected_url="https://www.raycast.com",
+        )
+        page.connections["developer-productivity"] += 1
+
+        rendered = bw.render_page(page)
+
+        self.assertIn("- Raycast - Your shortcut to everything.", rendered)
+        self.assertNotIn("Raycast is saved as a tool/site reference.", rendered)
+
     def test_render_index_stays_compact_and_catalog_remains_exhaustive(self) -> None:
         topic = bw.Page(
             slug="coffee",

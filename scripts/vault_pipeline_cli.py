@@ -35,17 +35,21 @@ def _log_stage(api: ModuleType, stage: str, status: str, **details: object) -> N
 
 @contextmanager
 def pipeline_lock(api: ModuleType, capture_root: Path) -> Iterator[None]:
+    lock_contention_errnos = {errno.EACCES, errno.EAGAIN, errno.EDEADLK}
+
     def parse_lock_timestamp(value: object) -> datetime:
         if not isinstance(value, str):
             raise ValueError("lock timestamp must be a string")
         return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
 
-    def read_lock_metadata(handle: TextIO) -> dict[str, object]:
-        handle.seek(0)
-        raw = handle.read().strip()
-        if not raw:
-            raise ValueError("lock metadata is empty")
-        payload = json.loads(raw)
+    def parse_lock_metadata(raw: str) -> dict[str, object]:
+        lines = raw.splitlines()
+        if len(lines) != 1:
+            raise ValueError("lock metadata must be exactly one line")
+        payload = json.loads(lines[0])
+        return validate_lock_metadata(payload)
+
+    def validate_lock_metadata(payload: object) -> dict[str, object]:
         if not isinstance(payload, dict):
             raise ValueError("lock metadata must be an object")
         if payload.get("version") != 1:
@@ -58,6 +62,38 @@ def pipeline_lock(api: ModuleType, capture_root: Path) -> Iterator[None]:
             raise ValueError("lock metadata missing capture root")
         parse_lock_timestamp(payload.get("acquired_at"))
         return payload
+
+    def read_lock_metadata(handle: TextIO) -> dict[str, object]:
+        handle.seek(0)
+        raw = handle.read().strip()
+        if not raw:
+            raise ValueError("lock metadata is empty")
+        return parse_lock_metadata(raw)
+
+    def read_corrupt_lock_live_pids(handle: TextIO) -> set[int]:
+        handle.seek(0)
+        live_pids: set[int] = set()
+        for line in handle.read().splitlines():
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict) or not isinstance(payload.get("pid"), int):
+                continue
+            if process_is_running(payload["pid"]):
+                live_pids.add(payload["pid"])
+        return live_pids
+
+    def process_is_running(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
 
     def write_lock_metadata(handle: TextIO, metadata: dict[str, object]) -> None:
         handle.seek(0)
@@ -78,6 +114,21 @@ def pipeline_lock(api: ModuleType, capture_root: Path) -> Iterator[None]:
             replacement_path.unlink(missing_ok=True)
             raise
 
+    def open_lock_handle(path: Path) -> TextIO:
+        try:
+            return path.open("r+", encoding="utf-8")
+        except FileNotFoundError:
+            return path.open("w+", encoding="utf-8")
+
+    def claim_stale_lock(path: Path) -> TextIO:
+        try:
+            claim_fd = os.open(stale_claim_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError as claim_exc:
+            raise RuntimeError(f"pipeline lock is already held: {path}") from claim_exc
+
+        os.close(claim_fd)
+        return acquire_new_lock_handle(path)
+
     capture_root.mkdir(parents=True, exist_ok=True)
     lock_path = capture_root / "pipeline.lock"
     stale_claim_path = capture_root / "pipeline.lock.stale-claim"
@@ -88,29 +139,27 @@ def pipeline_lock(api: ModuleType, capture_root: Path) -> Iterator[None]:
         "acquired_at": api.utc_timestamp(),
         "capture_root": str(capture_root),
     }
-    handle = lock_path.open("a+", encoding="utf-8")
+    handle = open_lock_handle(lock_path)
     try:
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
-            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+            if exc.errno in lock_contention_errnos:
                 try:
                     existing_metadata = read_lock_metadata(handle)
                 except (OSError, ValueError, json.JSONDecodeError):
-                    raise RuntimeError(f"pipeline lock is already held: {lock_path}") from exc
+                    live_pids = read_corrupt_lock_live_pids(handle)
+                    if live_pids:
+                        raise RuntimeError(f"pipeline lock is already held: {lock_path}") from exc
+                    handle.close()
+                    handle = claim_stale_lock(lock_path)
+                else:
+                    acquired_at = parse_lock_timestamp(existing_metadata["acquired_at"])
+                    if (datetime.now(UTC) - acquired_at).total_seconds() <= 30 * 60:
+                        raise RuntimeError(f"pipeline lock is already held: {lock_path}") from exc
 
-                acquired_at = parse_lock_timestamp(existing_metadata["acquired_at"])
-                if (datetime.now(UTC) - acquired_at).total_seconds() <= 30 * 60:
-                    raise RuntimeError(f"pipeline lock is already held: {lock_path}") from exc
-
-                try:
-                    claim_fd = os.open(stale_claim_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-                except FileExistsError as claim_exc:
-                    raise RuntimeError(f"pipeline lock is already held: {lock_path}") from claim_exc
-
-                os.close(claim_fd)
-                handle.close()
-                handle = acquire_new_lock_handle(lock_path)
+                    handle.close()
+                    handle = claim_stale_lock(lock_path)
             else:
                 raise
         write_lock_metadata(handle, metadata)

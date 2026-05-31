@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import fcntl
 import io
 import json
@@ -364,21 +365,7 @@ class VaultPipelineTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            (wiki_root / "coffee.md").write_text(
-                "\n".join(
-                    [
-                        "# Coffee",
-                        "",
-                        "## Connections",
-                        "",
-                        "- [[coffee-preferences]]",
-                        "",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            raw_path = raw_root / "life" / "coffee" / "home" / "coffee-preferences-123.md"
-            raw_path.parent.mkdir(parents=True)
+            raw_path = raw_root / "coffee-preferences-123.md"
             raw_path.write_text(
                 vp.render_note(
                     {
@@ -724,6 +711,86 @@ class VaultPipelineTests(unittest.TestCase):
             )
             self.assertTrue((wiki_root / "travel-note.md").exists())
 
+    def test_existing_atomic_topic_child_collision_receives_source_and_parent_connection(self) -> None:
+        with isolated_env() as (_, raw_root, wiki_root, _):
+            (wiki_root / "sports-performance-training-methods.md").write_text(
+                "# Sports Performance Training Methods\n\n## Connections\n\n- [[strength-training]]\n",
+                encoding="utf-8",
+            )
+            (wiki_root / "strength-training.md").write_text(
+                "# Strength Training\n\n## Notes\n\n- Existing lifting note.\n\n## Connections\n\n- [[training]]\n",
+                encoding="utf-8",
+            )
+            raw_path = raw_root / "sports-performance-training-methods" / "strength-123.md"
+            raw_path.parent.mkdir(parents=True)
+            raw_path.write_text(
+                vp.render_raw_file(
+                    capture_id="123",
+                    title="Sports performance strength training",
+                    created_at="2026-04-24T10:00:00Z",
+                    source_file="Sports performance strength training.md",
+                    body="Strength training helps athletes handle contact.",
+                ),
+                encoding="utf-8",
+            )
+
+            outcome = vp._upsert_wiki_pages_for_note(
+                title="Sports performance strength training",
+                body="Strength training helps athletes handle contact.",
+                raw_path=raw_path,
+            )
+
+            self.assertEqual(outcome.router_decision.action, "light_update")
+            self.assertIn("strength-training", outcome.changed_slugs)
+            child_text = (wiki_root / "strength-training.md").read_text(encoding="utf-8")
+            parent_text = (wiki_root / "sports-performance-training-methods.md").read_text(encoding="utf-8")
+            self.assertIn("Strength training helps athletes handle contact.", child_text)
+            self.assertIn("../raw/sports-performance-training-methods/strength-123.md", child_text)
+            self.assertIn("- [[sports-performance-training-methods]]", child_text)
+            self.assertIn("- [[strength-training]]", parent_text)
+
+    def test_existing_topic_child_collision_routes_through_heavy_update(self) -> None:
+        with isolated_env() as (_, raw_root, wiki_root, _):
+            (wiki_root / "sports-performance-training-methods.md").write_text(
+                "# Sports Performance Training Methods\n\n## Connections\n\n- [[training-plan]]\n",
+                encoding="utf-8",
+            )
+            (wiki_root / "training-plan.md").write_text(
+                "# Training Plan\n\n## Connections\n\n- [[sports-performance-training-methods]]\n",
+                encoding="utf-8",
+            )
+            raw_path = raw_root / "sports-performance-training-methods" / "training-plan-123.md"
+            raw_path.parent.mkdir(parents=True)
+            raw_path.write_text(
+                vp.render_raw_file(
+                    capture_id="123",
+                    title="Sports performance training plan",
+                    created_at="2026-04-24T10:00:00Z",
+                    source_file="Sports performance training plan.md",
+                    body="Training plan notes for sport performance.",
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                mock.patch.object(vp, "_build_heavy_update_proposal", wraps=vp._build_heavy_update_proposal) as build_mock,
+                mock.patch.object(
+                    vp,
+                    "_apply_heavy_update_proposal",
+                    return_value=({}, [], False, vp.OperationalEffects()),
+                ) as apply_mock,
+            ):
+                outcome = vp._upsert_wiki_pages_for_note(
+                    title="Sports performance training plan",
+                    body="Training plan notes for sport performance.",
+                    raw_path=raw_path,
+                )
+
+            self.assertEqual(outcome.router_decision.action, "heavy_update")
+            self.assertTrue(outcome.router_decision.reorganization_risk)
+            self.assertTrue(build_mock.called)
+            self.assertTrue(apply_mock.called)
+
     def test_ingest_does_not_clone_source_body_to_folder_topic_assignment(self) -> None:
         with isolated_env() as (_, raw_root, wiki_root, _):
             (wiki_root / "coffee-grinder.md").write_text(
@@ -743,10 +810,10 @@ class VaultPipelineTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            (wiki_root / "coffee.md").write_text(
+            (wiki_root / "coffee-equipment-maintenance-systems.md").write_text(
                 "\n".join(
                     [
-                        "# Coffee",
+                        "# Coffee Equipment Maintenance Systems",
                         "",
                         "## Connections",
                         "",
@@ -756,32 +823,32 @@ class VaultPipelineTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            raw_path = raw_root / "coffee" / "coffee-grinder-123.md"
+            raw_path = raw_root / "coffee-equipment-maintenance-systems" / "coffee-grinder-123.md"
             raw_path.parent.mkdir(parents=True)
             raw_path.write_text(
                 vp.render_raw_file(
                     capture_id="123",
-                    title="Coffee Grinder",
+                    title="Coffee grinder equipment",
                     created_at="2026-04-24T10:00:00Z",
-                    source_file="Coffee Grinder.md",
+                    source_file="Coffee grinder equipment.md",
                     body="Coffee tastes better when the grinder is dialed in.",
                 ),
                 encoding="utf-8",
             )
 
             outcome = vp._upsert_wiki_pages_for_note(
-                title="Coffee Grinder",
+                title="Coffee grinder equipment",
                 body="Coffee tastes better when the grinder is dialed in.",
                 raw_path=raw_path,
             )
 
-            self.assertEqual(outcome.router_decision.action, "heavy_update")
+            self.assertEqual(outcome.router_decision.action, "light_update")
             owner_text = (wiki_root / "coffee-grinder.md").read_text(encoding="utf-8")
-            folder_text = (wiki_root / "coffee.md").read_text(encoding="utf-8")
+            folder_text = (wiki_root / "coffee-equipment-maintenance-systems.md").read_text(encoding="utf-8")
             self.assertIn("Coffee tastes better when the grinder is dialed in.", owner_text)
-            self.assertIn("../raw/coffee/coffee-grinder-123.md", owner_text)
+            self.assertIn("../raw/coffee-equipment-maintenance-systems/coffee-grinder-123.md", owner_text)
             self.assertNotIn("Coffee tastes better when the grinder is dialed in.", folder_text)
-            self.assertNotIn("../raw/coffee/coffee-grinder-123.md", folder_text)
+            self.assertNotIn("../raw/coffee-equipment-maintenance-systems/coffee-grinder-123.md", folder_text)
 
     def test_lint_reports_invalid_shape_dead_citation_dead_link_orphan_and_open_question(self) -> None:
         with isolated_env() as (_, _, wiki_root, _):
@@ -1357,6 +1424,78 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertIn(("food", "existing"), assignments)
             self.assertNotIn(("chipotle-honey-chicken-is-pretty-good", "title"), assignments)
 
+    def test_existing_page_matches_use_whole_tokens_without_substrings(self) -> None:
+        with isolated_env() as (_, _, wiki_root, _):
+            (wiki_root / "art.md").write_text("# Art\n\n## Connections\n\n- [[design]]\n", encoding="utf-8")
+            (wiki_root / "martial-arts.md").write_text("# Martial Arts\n\n## Connections\n\n- [[training]]\n", encoding="utf-8")
+
+            matches = vp._existing_page_matches("Martial arts practice", "Training notes.")
+
+            self.assertEqual(matches, ["martial-arts"])
+
+    def test_existing_page_match_ranking_has_no_generic_penalty(self) -> None:
+        with isolated_env() as (_, _, wiki_root, _):
+            (wiki_root / "recipe.md").write_text("# Recipe\n\n## Connections\n\n- [[food]]\n", encoding="utf-8")
+            (wiki_root / "cake.md").write_text("# Cake\n\n## Connections\n\n- [[recipe]]\n", encoding="utf-8")
+
+            matches = vp._existing_page_matches("Cake recipe", "A compact recipe note.")
+
+            self.assertEqual(matches[:2], ["recipe", "cake"])
+
+    def test_meaningful_tokens_keep_things_and_count_hyphenated_slug(self) -> None:
+        self.assertEqual(vp._meaningful_tokens("things-and-the-app"), ["things", "app"])
+        self.assertEqual(vp._meaningful_token_count("football-and-strength-training"), 3)
+
+    def test_best_existing_concept_excludes_parent(self) -> None:
+        assignments = [("football", "existing"), ("strength-training", "existing"), ("training", "folder")]
+
+        self.assertEqual(vp._first_non_parent_existing_concept(assignments, "football"), "strength-training")
+
+    def test_topic_child_combined_slug_over_five_tokens_falls_back_to_best_concept(self) -> None:
+        with isolated_env():
+            child_slug = vp._derive_topic_child_slug(
+                parent_slug="sports-performance-training-methods",
+                title="Sports performance strength training",
+                page_assignments=[
+                    ("strength-training", "existing"),
+                    ("sports-performance-training-methods", "folder"),
+                ],
+            )
+
+            self.assertEqual(child_slug, "strength-training")
+
+    def test_topic_child_long_title_without_concept_falls_back_to_parent_note(self) -> None:
+        with isolated_env():
+            child_slug = vp._derive_topic_child_slug(
+                parent_slug="football",
+                title="football and strength training recovery nutrition planning",
+                page_assignments=[("football", "folder")],
+            )
+
+            self.assertEqual(child_slug, "football-note")
+
+    def test_topic_child_parent_note_suffixes_on_collision(self) -> None:
+        with isolated_env() as (_, _, wiki_root, _):
+            (wiki_root / "football-note.md").write_text("# Football Note\n\n## Connections\n\n- [[football]]\n", encoding="utf-8")
+
+            child_slug = vp._derive_topic_child_slug(
+                parent_slug="football",
+                title="football and strength training recovery nutrition planning",
+                page_assignments=[("football", "folder")],
+            )
+
+            self.assertEqual(child_slug, "football-note-2")
+
+    def test_topic_child_title_fallback_allows_five_meaningful_tokens(self) -> None:
+        with isolated_env():
+            child_slug = vp._derive_topic_child_slug(
+                parent_slug="football",
+                title="strength training recovery nutrition plan",
+                page_assignments=[("football", "folder")],
+            )
+
+            self.assertEqual(child_slug, "strength-training-recovery-nutrition-plan")
+
     def test_default_assignments_resolve_dutch_baby_existing_page(self) -> None:
         with isolated_env() as (_, raw_root, wiki_root, _):
             (wiki_root / "dutch-baby.md").write_text("# Dutch Baby\n\n## Connections\n\n- [[food]]\n", encoding="utf-8")
@@ -1365,7 +1504,8 @@ class VaultPipelineTests(unittest.TestCase):
 
             assignments = vp._build_default_page_assignments("Make Dutch baby for sydney", "", raw_path)
 
-            self.assertEqual(assignments, [("dutch-baby", "existing")])
+            self.assertEqual(assignments[0], ("dutch-baby", "existing"))
+            self.assertIn(("sydney", "existing"), assignments)
 
     def test_default_assignments_fall_back_to_title_slug_without_existing_match(self) -> None:
         with isolated_env() as (_, raw_root, wiki_root, _):
@@ -2127,6 +2267,20 @@ class VaultPipelineTests(unittest.TestCase):
                     UTC,
                 )
 
+    def test_pipeline_lock_repeated_acquisitions_keep_one_metadata_line(self) -> None:
+        with isolated_env() as (_, _, _, capture_root):
+            lock_path = capture_root / "pipeline.lock"
+
+            with vp.pipeline_lock(capture_root):
+                first_token = json.loads(lock_path.read_text(encoding="utf-8"))["owner_token"]
+
+            with vp.pipeline_lock(capture_root):
+                raw = lock_path.read_text(encoding="utf-8")
+                metadata = json.loads(raw)
+
+            self.assertEqual(len(raw.splitlines()), 1)
+            self.assertNotEqual(metadata["owner_token"], first_token)
+
     def test_pipeline_lock_rejects_fresh_contention_and_recovers_stale_lock(self) -> None:
         with isolated_env() as (_, _, _, capture_root):
             lock_path = capture_root / "pipeline.lock"
@@ -2162,6 +2316,73 @@ class VaultPipelineTests(unittest.TestCase):
             finally:
                 fcntl.flock(stale_handle.fileno(), fcntl.LOCK_UN)
                 stale_handle.close()
+
+    def test_pipeline_lock_recovers_corrupt_multiline_stale_lock(self) -> None:
+        with isolated_env() as (_, _, _, capture_root):
+            lock_path = capture_root / "pipeline.lock"
+            old_timestamp = (datetime.now(UTC) - timedelta(minutes=31)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            stale_records = [
+                {
+                    "version": 1,
+                    "owner_token": "stale-owner-one",
+                    "pid": 99998,
+                    "acquired_at": old_timestamp,
+                    "capture_root": str(capture_root),
+                },
+                {
+                    "version": 1,
+                    "owner_token": "stale-owner-two",
+                    "pid": 99999,
+                    "acquired_at": old_timestamp,
+                    "capture_root": str(capture_root),
+                },
+            ]
+            lock_path.write_text(
+                "\n".join(json.dumps(record, separators=(",", ":")) for record in stale_records) + "\n",
+                encoding="utf-8",
+            )
+            stale_handle = lock_path.open("r+", encoding="utf-8")
+            self.addCleanup(stale_handle.close)
+            fcntl.flock(stale_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            try:
+                with vp.pipeline_lock(capture_root):
+                    raw = lock_path.read_text(encoding="utf-8")
+                    metadata = json.loads(raw)
+                    self.assertEqual(len(raw.splitlines()), 1)
+                    self.assertNotIn(metadata["owner_token"], {"stale-owner-one", "stale-owner-two"})
+            finally:
+                fcntl.flock(stale_handle.fileno(), fcntl.LOCK_UN)
+                stale_handle.close()
+
+    def test_pipeline_lock_treats_edeadlk_as_recoverable_contention(self) -> None:
+        with isolated_env() as (_, _, _, capture_root):
+            lock_path = capture_root / "pipeline.lock"
+            lock_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "owner_token": "stale-owner",
+                        "pid": 99999,
+                        "acquired_at": (datetime.now(UTC) - timedelta(minutes=31)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "capture_root": str(capture_root),
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            deadlock_error = OSError(errno.EDEADLK, os.strerror(errno.EDEADLK))
+
+            def flock_once_with_deadlock(fd: int, operation: int) -> None:
+                if not hasattr(flock_once_with_deadlock, "raised"):
+                    flock_once_with_deadlock.raised = True
+                    raise deadlock_error
+
+            with mock.patch.object(vp.cli_impl.fcntl, "flock", side_effect=flock_once_with_deadlock):
+                with vp.pipeline_lock(capture_root):
+                    metadata = json.loads(lock_path.read_text(encoding="utf-8"))
+                    self.assertNotEqual(metadata["owner_token"], "stale-owner")
 
     def test_pipeline_lock_stale_claim_blocks_second_recovery_attempt(self) -> None:
         with isolated_env() as (_, _, _, capture_root):

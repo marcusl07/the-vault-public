@@ -9,6 +9,35 @@ from typing import TYPE_CHECKING, Callable, TextIO
 if TYPE_CHECKING:
     from types import ModuleType
 
+MEANINGFUL_TOKEN_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "but",
+    "by",
+    "for",
+    "from",
+    "in",
+    "into",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "this",
+    "to",
+    "when",
+    "with",
+    "you",
+    "your",
+}
+
 
 def _normalize_ingest_item(api: ModuleType, item: dict[str, object]) -> dict[str, str]:
     if not isinstance(item, dict):
@@ -74,8 +103,16 @@ def _wiki_system_slugs(api: ModuleType) -> set[str]:
     return {"index", "log", "review", Path(api.bw.CATALOG_PATH).stem}
 
 
+def _meaningful_tokens(api: ModuleType, text: str) -> list[str]:
+    return [token for token in api.re.findall(r"[a-z0-9]+", text.lower()) if token not in MEANINGFUL_TOKEN_STOPWORDS]
+
+
+def _meaningful_token_count(api: ModuleType, text: str) -> int:
+    return len(api._meaningful_tokens(text))
+
+
 def _tokenize_for_existing_match(api: ModuleType, text: str) -> list[str]:
-    return api.re.findall(r"[a-z0-9]+", text.lower())
+    return api._meaningful_tokens(text)
 
 
 def _contains_token_phrase(haystack: list[str], needle: list[str]) -> bool:
@@ -100,14 +137,7 @@ def _existing_page_matches(api: ModuleType, title: str, body: str) -> list[str]:
     if not capture_tokens or not api.WIKI_ROOT.exists():
         return []
 
-    generic_slugs = {
-        "food",
-        "foods",
-        "recipe",
-        "recipes",
-        "mexican-food",
-    }
-    matches: list[tuple[int, int, int, str]] = []
+    matches: list[tuple[int, int, str]] = []
     for page_path in api.WIKI_ROOT.glob("*.md"):
         slug = page_path.stem
         if slug in api._wiki_system_slugs():
@@ -119,22 +149,89 @@ def _existing_page_matches(api: ModuleType, title: str, body: str) -> list[str]:
         phrase_tokens = max(phrase_options, key=lambda tokens: (len(tokens), sum(len(token) for token in tokens)), default=[])
         if not phrase_tokens or not api._contains_token_phrase(capture_tokens, phrase_tokens):
             continue
-        generic_penalty = 1 if slug in generic_slugs else 0
         matches.append(
             (
-                generic_penalty,
                 -len(phrase_tokens),
                 -sum(len(token) for token in phrase_tokens),
                 slug,
             )
         )
-    if any(generic_penalty == 0 and -token_count > 1 for generic_penalty, token_count, _char_count, _slug in matches):
-        matches = [
-            match
-            for match in matches
-            if match[0] == 1 or -match[1] > 1
-        ]
-    return [slug for _generic_penalty, _token_count, _char_count, slug in sorted(matches)]
+    return [slug for _token_count, _char_count, slug in sorted(matches)]
+
+
+def _first_non_parent_existing_concept(page_assignments: list[tuple[str, str]], parent_slug: str) -> str | None:
+    for slug, seed_kind in page_assignments:
+        if seed_kind == "existing" and slug != parent_slug:
+            return slug
+    return None
+
+
+def _unused_parent_note_slug(api: ModuleType, parent_slug: str) -> str:
+    base_slug = f"{parent_slug}-note"
+    candidate = base_slug
+    suffix = 2
+    while (api.WIKI_ROOT / f"{candidate}.md").exists():
+        candidate = f"{base_slug}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _derive_topic_child_slug(
+    api: ModuleType,
+    *,
+    parent_slug: str,
+    title: str,
+    page_assignments: list[tuple[str, str]],
+) -> str:
+    title_slug = api.bw.clean_component(title) or api.bw.slugify(title)
+    concept_slug = api._first_non_parent_existing_concept(page_assignments, parent_slug)
+    if concept_slug is not None:
+        combined_slug = f"{parent_slug}-and-{concept_slug}"
+        if combined_slug != parent_slug and api._meaningful_token_count(combined_slug) <= 5:
+            return combined_slug
+        return concept_slug
+    if title_slug and title_slug != parent_slug and api._meaningful_token_count(title_slug) <= 5:
+        return title_slug
+    return api._unused_parent_note_slug(parent_slug)
+
+
+def _router_decision_for_topic_collision(api: ModuleType, decision: object, child_slug: str) -> object:
+    if child_slug in decision.target_pages and decision.reorganization_risk and decision.action == "heavy_update":
+        return decision
+    target_pages = api.bw.ordered_unique([*decision.target_pages, child_slug])
+    candidate_new_pages = [slug for slug in decision.candidate_new_pages if slug != child_slug]
+    return api._validate_router_decision(
+        api.RouterDecision(
+            action="heavy_update",
+            target_pages=target_pages,
+            new_page_signal=bool(candidate_new_pages),
+            candidate_new_pages=candidate_new_pages,
+            contradiction_risk=decision.contradiction_risk,
+            reorganization_risk=True,
+            confidence=decision.confidence,
+            reason="Chosen deterministic topic child is an existing topic and needs structural reorganization.",
+        )
+    )
+
+
+def _router_decision_for_atomic_topic_children(
+    api: ModuleType,
+    decision: object,
+    resolved_assignments: list[tuple[str, str, str | None]],
+) -> object:
+    resolved_slugs = api.bw.ordered_unique([slug for slug, _seed_kind, _parent_slug in resolved_assignments])
+    return api._validate_router_decision(
+        api.RouterDecision(
+            action="light_update",
+            target_pages=resolved_slugs,
+            new_page_signal=False,
+            candidate_new_pages=[],
+            contradiction_risk=decision.contradiction_risk,
+            reorganization_risk=False,
+            confidence=decision.confidence,
+            reason="Existing atomic topic child can absorb a bounded update with a parent connection.",
+        )
+    )
 
 
 def _build_default_page_assignments(api: ModuleType, title: str, body: str, raw_abspath: Path) -> list[tuple[str, str]]:
@@ -393,35 +490,35 @@ def _upsert_wiki_pages_for_note(
         loaded_pages[slug] = page
         return page
 
-    primary_existing_owner: tuple[str, str] | None = None
+    topic_child_slugs: dict[str, str] = {}
+    consumed_existing_concepts: set[str] = set()
     for slug, seed_kind in page_assignments:
         page = load_page(slug, seed_kind)
-        if seed_kind == "existing" and api.bw.page_shape(page) != api.bw.PAGE_SHAPE_TOPIC:
-            primary_existing_owner = (slug, seed_kind)
-            break
+        if api.bw.page_shape(page) != api.bw.PAGE_SHAPE_TOPIC:
+            continue
+        child_slug = api._derive_topic_child_slug(parent_slug=slug, title=title, page_assignments=page_assignments)
+        topic_child_slugs[slug] = child_slug
+        concept_slug = api._first_non_parent_existing_concept(page_assignments, slug)
+        if concept_slug is not None:
+            consumed_existing_concepts.add(concept_slug)
 
     resolved_assignments: list[tuple[str, str, str | None]] = []
     seen_resolved: set[tuple[str, str | None]] = set()
     for slug, seed_kind in page_assignments:
         page = load_page(slug, seed_kind)
         if api.bw.page_shape(page) == api.bw.PAGE_SHAPE_TOPIC:
-            if seed_kind == "existing" and primary_existing_owner is not None:
-                owner_slug, owner_seed_kind = primary_existing_owner
-                key = (owner_slug, slug)
-                if key not in seen_resolved:
-                    resolved_assignments.append((owner_slug, owner_seed_kind, slug))
-                    seen_resolved.add(key)
-                continue
-            satellite_slug = api.bw.clean_component(title) or api.bw.slugify(title) or f"{slug}-note"
-            if satellite_slug == slug:
-                satellite_slug = f"{slug}-note"
+            satellite_slug = topic_child_slugs[slug]
             satellite_page = load_page(satellite_slug, seed_kind)
+            if api.bw.page_shape(satellite_page) == api.bw.PAGE_SHAPE_TOPIC and satellite_slug != slug:
+                router_decision = api._router_decision_for_topic_collision(router_decision, satellite_slug)
             satellite_page.topic_parent = slug
             key = (satellite_slug, slug)
             if key not in seen_resolved:
                 resolved_assignments.append((satellite_slug, seed_kind, slug))
                 seen_resolved.add(key)
         else:
+            if slug in consumed_existing_concepts:
+                continue
             key = (slug, None)
             if key not in seen_resolved:
                 resolved_assignments.append((slug, seed_kind, None))
@@ -430,6 +527,18 @@ def _upsert_wiki_pages_for_note(
     if not resolved_assignments:
         fallback_slug = api.bw.clean_component(title) or api.bw.slugify(title) or "uncategorized-captures"
         resolved_assignments.append((fallback_slug, "title", None))
+
+    atomic_topic_child_collision = (
+        router_decision.action == "heavy_update"
+        and router_decision.reorganization_risk
+        and router_decision.contradiction_risk == "low"
+        and bool(resolved_assignments)
+        and all((api.WIKI_ROOT / f"{slug}.md").exists() for slug, _seed_kind, _parent_slug in resolved_assignments)
+        and all(api.bw.page_shape(load_page(slug, seed_kind)) == api.bw.PAGE_SHAPE_ATOMIC for slug, seed_kind, _parent_slug in resolved_assignments)
+        and any(parent_slug for _slug, _seed_kind, parent_slug in resolved_assignments)
+    )
+    if atomic_topic_child_collision:
+        router_decision = api._router_decision_for_atomic_topic_children(router_decision, resolved_assignments)
 
     resolved_slugs = [slug for slug, _seed_kind, _parent_slug in resolved_assignments]
     simple_new_page_flow = (

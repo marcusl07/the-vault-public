@@ -64,6 +64,8 @@ When answering a question:
 2. Read the most relevant wiki pages.
 3. Follow one or two tight wikilink hops when they add real context.
 4. Answer from the maintained wiki, not from general memory and not by rediscovering everything from raw sources.
+5. Do not use web search or external browsing as a fallback for wiki questions.
+6. If the wiki does not contain enough information, say that directly.
 
 Useful query outputs may themselves become durable wiki artifacts when they add lasting value.
 
@@ -112,4 +114,3 @@ At small to moderate scale, `wiki/index.md` can act as the primary navigation su
 - Forcing every source into a brand-new page.
 - Reproducing input folder structure in the wiki.
 - Adding complex retrieval infrastructure before the index and wiki graph stop being sufficient.
-

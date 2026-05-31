@@ -267,6 +267,8 @@ def ensure_meaningful_connections(api: ModuleType, pages: dict[str, object]) -> 
         if api.sorted_connection_slugs(page):
             continue
         related_slug = page.topic_parent if page.topic_parent in pages else find_best_related_slug(api, page, pages)
+        if not related_slug and "uncategorized-captures" in pages:
+            related_slug = "uncategorized-captures"
         if related_slug:
             api.connect_pages(pages, slug, related_slug)
 

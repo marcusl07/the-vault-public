@@ -127,6 +127,8 @@ Code should remain authoritative for:
 - `wiki/index.md` is the primary navigation surface and should stay compact enough to fit comfortably in model context.
 - `wiki/catalog.md`, when present, is the exhaustive lookup artifact and should be regenerated automatically rather than hand-maintained.
 - Query flow should use `wiki/index.md` first, then `wiki/catalog.md` if available, then direct wiki search as a last resort.
+- Wiki questions are local-only: do not use Google, web search, or external browsing as a fallback when the wiki is thin.
+- If the wiki does not contain enough information, answer that explicitly rather than supplementing from outside sources.
 - `wiki/log.md` is append-only historical trace.
 - `wiki/review.md` is the actionable backlog for contradictions and deferred work.
 

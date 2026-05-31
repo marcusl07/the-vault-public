@@ -547,6 +547,14 @@ def _wiki_system_slugs() -> set[str]:
     return wiki_impl._wiki_system_slugs(sys.modules[__name__])
 
 
+def _meaningful_tokens(text: str) -> list[str]:
+    return wiki_impl._meaningful_tokens(sys.modules[__name__], text)
+
+
+def _meaningful_token_count(text: str) -> int:
+    return wiki_impl._meaningful_token_count(sys.modules[__name__], text)
+
+
 def _tokenize_for_existing_match(text: str) -> list[str]:
     return wiki_impl._tokenize_for_existing_match(sys.modules[__name__], text)
 
@@ -561,6 +569,39 @@ def _existing_page_title(page_path: Path) -> str:
 
 def _existing_page_matches(title: str, body: str) -> list[str]:
     return wiki_impl._existing_page_matches(sys.modules[__name__], title, body)
+
+
+def _first_non_parent_existing_concept(page_assignments: list[tuple[str, str]], parent_slug: str) -> str | None:
+    return wiki_impl._first_non_parent_existing_concept(page_assignments, parent_slug)
+
+
+def _unused_parent_note_slug(parent_slug: str) -> str:
+    return wiki_impl._unused_parent_note_slug(sys.modules[__name__], parent_slug)
+
+
+def _derive_topic_child_slug(
+    *,
+    parent_slug: str,
+    title: str,
+    page_assignments: list[tuple[str, str]],
+) -> str:
+    return wiki_impl._derive_topic_child_slug(
+        sys.modules[__name__],
+        parent_slug=parent_slug,
+        title=title,
+        page_assignments=page_assignments,
+    )
+
+
+def _router_decision_for_topic_collision(decision: RouterDecision, child_slug: str) -> RouterDecision:
+    return wiki_impl._router_decision_for_topic_collision(sys.modules[__name__], decision, child_slug)
+
+
+def _router_decision_for_atomic_topic_children(
+    decision: RouterDecision,
+    resolved_assignments: list[tuple[str, str, str | None]],
+) -> RouterDecision:
+    return wiki_impl._router_decision_for_atomic_topic_children(sys.modules[__name__], decision, resolved_assignments)
 
 
 def _build_default_page_assignments(title: str, body: str, raw_abspath: Path) -> list[tuple[str, str]]:

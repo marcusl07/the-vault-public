@@ -86,6 +86,9 @@ def build_simple_notes_markdown(page: Page) -> str:
         source = next(iter(page.sources.values()))
         excerpt = compact_source_text(source, limit=220).strip()
         normalized_excerpt = re.sub(r"\s+", " ", excerpt)
+        if source.fetched_summary:
+            body = source.fetched_summary.strip()
+            return body if ("\n" in body or re.search(r"^(?:#|-|\d+\.)", body, flags=re.M)) else f"- {body}"
         synthesized_notes = [
             note
             for note in note_candidates
@@ -97,8 +100,6 @@ def build_simple_notes_markdown(page: Page) -> str:
             return f"- {normalized_excerpt}"
 
         body_parts = []
-        if source.fetched_summary:
-            body_parts.append(source.fetched_summary)
         if source.cleaned_text:
             body_parts.append(source.cleaned_text)
         body = "\n\n".join(part for part in body_parts if part).strip()

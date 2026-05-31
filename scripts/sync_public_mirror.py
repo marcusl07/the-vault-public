@@ -19,16 +19,20 @@ DEFAULT_EXCLUDES = {
     "__pycache__",
     ".pytest_cache",
     ".wiki-bootstrap-cache",
+    "capture",
     "raw",
+    "sources",
     "wiki",
     "ingest.log",
     "log.jsonl",
     "state",
     "AGENTS.md",
+    "reminders.txt",
 }
 
 DEFAULT_EXCLUDED_FILES = {
     Path("docs/wiki_duplicate_notes_report.md"),
+    Path("vault_scaling_handoff.docx"),
 }
 
 
