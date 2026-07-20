@@ -2254,9 +2254,9 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertEqual(payload["capture_id"], "abc")
 
     def test_pipeline_lock_writes_metadata(self) -> None:
-        with isolated_env() as (_, _, _, capture_root):
+        with isolated_env() as (root, _, _, capture_root):
             with vp.pipeline_lock(capture_root):
-                metadata = json.loads((capture_root / "pipeline.lock").read_text(encoding="utf-8"))
+                metadata = json.loads((root / "state" / "pipeline.lock").read_text(encoding="utf-8"))
                 self.assertEqual(metadata["version"], 1)
                 self.assertEqual(metadata["pid"], os.getpid())
                 self.assertEqual(metadata["capture_root"], str(capture_root))
@@ -2266,10 +2266,11 @@ class VaultPipelineTests(unittest.TestCase):
                     datetime.strptime(metadata["acquired_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC).tzinfo,
                     UTC,
                 )
+            self.assertFalse((capture_root / "pipeline.lock").exists())
 
     def test_pipeline_lock_repeated_acquisitions_keep_one_metadata_line(self) -> None:
-        with isolated_env() as (_, _, _, capture_root):
-            lock_path = capture_root / "pipeline.lock"
+        with isolated_env() as (root, _, _, capture_root):
+            lock_path = root / "state" / "pipeline.lock"
 
             with vp.pipeline_lock(capture_root):
                 first_token = json.loads(lock_path.read_text(encoding="utf-8"))["owner_token"]
@@ -2282,8 +2283,9 @@ class VaultPipelineTests(unittest.TestCase):
             self.assertNotEqual(metadata["owner_token"], first_token)
 
     def test_pipeline_lock_rejects_fresh_contention_and_recovers_stale_lock(self) -> None:
-        with isolated_env() as (_, _, _, capture_root):
-            lock_path = capture_root / "pipeline.lock"
+        with isolated_env() as (root, _, _, capture_root):
+            lock_path = root / "state" / "pipeline.lock"
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
 
             with vp.pipeline_lock(capture_root):
                 with self.assertRaisesRegex(RuntimeError, "pipeline lock is already held"):
@@ -2312,14 +2314,15 @@ class VaultPipelineTests(unittest.TestCase):
                 with vp.pipeline_lock(capture_root):
                     metadata = json.loads(lock_path.read_text(encoding="utf-8"))
                     self.assertNotEqual(metadata["owner_token"], "stale-owner")
-                self.assertFalse((capture_root / "pipeline.lock.stale-claim").exists())
+                self.assertFalse((root / "state" / "pipeline.lock.stale-claim").exists())
             finally:
                 fcntl.flock(stale_handle.fileno(), fcntl.LOCK_UN)
                 stale_handle.close()
 
     def test_pipeline_lock_recovers_corrupt_multiline_stale_lock(self) -> None:
-        with isolated_env() as (_, _, _, capture_root):
-            lock_path = capture_root / "pipeline.lock"
+        with isolated_env() as (root, _, _, capture_root):
+            lock_path = root / "state" / "pipeline.lock"
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
             old_timestamp = (datetime.now(UTC) - timedelta(minutes=31)).strftime("%Y-%m-%dT%H:%M:%SZ")
             stale_records = [
                 {
@@ -2356,8 +2359,9 @@ class VaultPipelineTests(unittest.TestCase):
                 stale_handle.close()
 
     def test_pipeline_lock_treats_edeadlk_as_recoverable_contention(self) -> None:
-        with isolated_env() as (_, _, _, capture_root):
-            lock_path = capture_root / "pipeline.lock"
+        with isolated_env() as (root, _, _, capture_root):
+            lock_path = root / "state" / "pipeline.lock"
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
             lock_path.write_text(
                 json.dumps(
                     {
@@ -2385,8 +2389,9 @@ class VaultPipelineTests(unittest.TestCase):
                     self.assertNotEqual(metadata["owner_token"], "stale-owner")
 
     def test_pipeline_lock_stale_claim_blocks_second_recovery_attempt(self) -> None:
-        with isolated_env() as (_, _, _, capture_root):
-            lock_path = capture_root / "pipeline.lock"
+        with isolated_env() as (root, _, _, capture_root):
+            lock_path = root / "state" / "pipeline.lock"
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
             lock_path.write_text(
                 json.dumps(
                     {
@@ -2401,7 +2406,7 @@ class VaultPipelineTests(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
-            (capture_root / "pipeline.lock.stale-claim").write_text("", encoding="utf-8")
+            (root / "state" / "pipeline.lock.stale-claim").write_text("", encoding="utf-8")
             stale_handle = lock_path.open("a+", encoding="utf-8")
             self.addCleanup(stale_handle.close)
             fcntl.flock(stale_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)

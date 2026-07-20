@@ -130,8 +130,10 @@ def pipeline_lock(api: ModuleType, capture_root: Path) -> Iterator[None]:
         return acquire_new_lock_handle(path)
 
     capture_root.mkdir(parents=True, exist_ok=True)
-    lock_path = capture_root / "pipeline.lock"
-    stale_claim_path = capture_root / "pipeline.lock.stale-claim"
+    lock_dir = api.ROOT / "state"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / "pipeline.lock"
+    stale_claim_path = lock_dir / "pipeline.lock.stale-claim"
     metadata = {
         "version": 1,
         "owner_token": str(uuid.uuid4()),
