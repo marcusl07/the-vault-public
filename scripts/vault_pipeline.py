@@ -770,12 +770,25 @@ def build_wiki_search_index(*, wiki_root: Path | None = None) -> search_impl.Wik
     return search_impl.build_wiki_search_index(sys.modules[__name__], wiki_root=wiki_root)
 
 
+def rebuild_wiki_sqlite_index(
+    *,
+    db_path: Path | None = None,
+    wiki_root: Path | None = None,
+) -> dict[str, object]:
+    return search_impl.rebuild_wiki_sqlite_index(
+        sys.modules[__name__],
+        db_path=db_path,
+        wiki_root=wiki_root,
+    )
+
+
 def search_wiki(
     query: str,
     *,
     top_k: int = 5,
     index: search_impl.WikiSearchIndex | None = None,
     wiki_root: Path | None = None,
+    db_path: Path | None = None,
 ) -> list[search_impl.WikiSearchResult]:
     return search_impl.search_wiki(
         sys.modules[__name__],
@@ -783,6 +796,7 @@ def search_wiki(
         top_k=top_k,
         index=index,
         wiki_root=wiki_root,
+        db_path=db_path,
     )
 
 

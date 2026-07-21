@@ -5,6 +5,7 @@ import fcntl
 import io
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from contextlib import contextmanager, redirect_stdout
@@ -269,6 +270,105 @@ class VaultPipelineTests(unittest.TestCase):
             payload = json.loads(stdout.getvalue())
             self.assertEqual(payload[0]["slug"], "home-cooking")
             self.assertGreater(payload[0]["score"], 0)
+
+    def test_sqlite_index_rebuild_indexes_pages_links_and_pagerank(self) -> None:
+        with isolated_env() as (root, _, wiki_root, _):
+            (wiki_root / "coffee.md").write_text(
+                "# Coffee\n\n## Notes\n\n- Coffee brewing connects grinder technique and extraction.\n\n## Connections\n\n- [[espresso]]\n- [[grinder]]\n",
+                encoding="utf-8",
+            )
+            (wiki_root / "espresso.md").write_text(
+                "# Espresso\n\n## Notes\n\n- Espresso extraction depends on dose and pressure.\n\n## Connections\n\n- [[coffee]]\n",
+                encoding="utf-8",
+            )
+            (wiki_root / "grinder.md").write_text(
+                "# Grinder\n\n## Notes\n\n- Grind size changes extraction.\n\n## Connections\n\n- [[coffee]]\n",
+                encoding="utf-8",
+            )
+            db_path = root / "state" / "vault.db"
+
+            result = vp.rebuild_wiki_sqlite_index(db_path=db_path)
+
+            self.assertEqual(result["pages"], 3)
+            self.assertEqual(result["links"], 4)
+            with sqlite3.connect(db_path) as db:
+                page_count = db.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
+                pagerank_count = db.execute("SELECT COUNT(*) FROM page_rank").fetchone()[0]
+                coffee_rank = db.execute("SELECT score FROM page_rank WHERE slug = 'coffee'").fetchone()[0]
+            self.assertEqual(page_count, 3)
+            self.assertEqual(pagerank_count, 3)
+            self.assertGreater(coffee_rank, 0)
+
+    def test_sqlite_search_uses_fts_and_reports_graph_reason(self) -> None:
+        with isolated_env() as (root, _, wiki_root, _):
+            (wiki_root / "coffee.md").write_text(
+                "# Coffee\n\n## Notes\n\n- Coffee brewing connects grinder technique and extraction.\n\n## Connections\n\n- [[espresso]]\n- [[grinder]]\n",
+                encoding="utf-8",
+            )
+            (wiki_root / "espresso.md").write_text(
+                "# Espresso\n\n## Notes\n\n- Espresso extraction depends on dose, pressure, and grinder settings.\n\n## Connections\n\n- [[coffee]]\n",
+                encoding="utf-8",
+            )
+            (wiki_root / "running.md").write_text(
+                "# Running\n\n## Notes\n\n- Hill repeats support aerobic training.\n\n## Connections\n\n- [[coffee]]\n",
+                encoding="utf-8",
+            )
+            db_path = root / "state" / "vault.db"
+            vp.rebuild_wiki_sqlite_index(db_path=db_path)
+
+            results = vp.search_wiki("espresso pressure grinder", top_k=2, db_path=db_path)
+
+            self.assertGreaterEqual(len(results), 1)
+            self.assertEqual(results[0].slug, "espresso")
+            self.assertIn("espresso", results[0].matched_terms)
+            self.assertGreater(results[0].text_score, 0)
+            self.assertGreater(results[0].pagerank_score, 0)
+            self.assertIn("PageRank", results[0].why)
+
+    def test_sqlite_index_graph_edges_are_wikilinks_only(self) -> None:
+        with isolated_env() as (root, _, wiki_root, _):
+            (wiki_root / "alpha.md").write_text(
+                "# Alpha\n\n## Notes\n\n- Alpha cites the same source label as beta.\n\n## Connections\n\n- [[beta]]\n\n## Sources\n\n- [Shared](../raw/shared.md)\n",
+                encoding="utf-8",
+            )
+            (wiki_root / "beta.md").write_text(
+                "# Beta\n\n## Notes\n\n- Beta cites the same source label as alpha.\n\n## Connections\n\n- [[alpha]]\n\n## Sources\n\n- [Shared](../raw/shared.md)\n",
+                encoding="utf-8",
+            )
+            (wiki_root / "gamma.md").write_text(
+                "# Gamma\n\n## Notes\n\n- Gamma also cites the same source without a wikilink.\n\n## Connections\n\n- [[delta]]\n\n## Sources\n\n- [Shared](../raw/shared.md)\n",
+                encoding="utf-8",
+            )
+            db_path = root / "state" / "vault.db"
+            vp.rebuild_wiki_sqlite_index(db_path=db_path)
+
+            with sqlite3.connect(db_path) as db:
+                edges = set(db.execute("SELECT source_slug, target_slug FROM links").fetchall())
+
+            self.assertIn(("alpha", "beta"), edges)
+            self.assertIn(("beta", "alpha"), edges)
+            self.assertNotIn(("alpha", "gamma"), edges)
+            self.assertNotIn(("gamma", "alpha"), edges)
+
+    def test_sqlite_search_cli_rebuild_and_search_outputs_json(self) -> None:
+        with isolated_env() as (root, _, wiki_root, _):
+            (wiki_root / "home-cooking.md").write_text(
+                "# Home Cooking\n\n## Notes\n\n- Batch cooking lentils helps weekday meals.\n\n## Connections\n\n- [[routines]]\n",
+                encoding="utf-8",
+            )
+            db_path = root / "state" / "vault.db"
+
+            with redirect_stdout(io.StringIO()):
+                rebuild_code = vp.search_main(["rebuild", "--db", str(db_path), "--json"])
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                search_code = vp.search_main(["search", "batch", "lentils", "--db", str(db_path), "--json", "--top-k", "1"])
+
+            self.assertEqual(rebuild_code, 0)
+            self.assertEqual(search_code, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload[0]["slug"], "home-cooking")
+            self.assertIn("why", payload[0])
 
     def test_router_marks_single_existing_atomic_page_as_light_update(self) -> None:
         with isolated_env() as (_, _, wiki_root, _):

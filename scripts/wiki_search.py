@@ -9,6 +9,11 @@ import re
 import sys
 from typing import TYPE_CHECKING
 
+try:
+    from scripts import wiki_sqlite_index as sqlite_impl
+except ModuleNotFoundError:  # pragma: no cover - direct script execution path
+    import wiki_sqlite_index as sqlite_impl
+
 if TYPE_CHECKING:
     from types import ModuleType
 
@@ -62,6 +67,9 @@ class WikiSearchResult:
     score: float
     matched_terms: tuple[str, ...]
     snippet: str
+    why: str = "lexical match"
+    text_score: float = 0.0
+    pagerank_score: float = 0.0
 
 
 @dataclass
@@ -180,10 +188,29 @@ def search_wiki(
     top_k: int = 5,
     index: WikiSearchIndex | None = None,
     wiki_root: Path | None = None,
+    db_path: Path | None = None,
 ) -> list[WikiSearchResult]:
     normalized_query = query.strip()
     if not normalized_query:
         return []
+
+    if index is None and wiki_root is None:
+        sqlite_path = db_path or sqlite_impl.default_db_path(api)
+        if sqlite_path.exists():
+            return [
+                WikiSearchResult(
+                    slug=result.slug,
+                    title=result.title,
+                    path=result.path,
+                    score=result.score,
+                    matched_terms=result.matched_terms,
+                    snippet=result.snippet,
+                    why=result.why,
+                    text_score=result.text_score,
+                    pagerank_score=result.pagerank_score,
+                )
+                for result in sqlite_impl.search_sqlite_index(api, normalized_query, db_path=sqlite_path, top_k=top_k)
+            ]
 
     search_index = index or build_wiki_search_index(api, wiki_root=wiki_root)
     query_tokens = _tokenize(normalized_query)
@@ -250,35 +277,73 @@ def load_wiki_search_index(path: Path) -> WikiSearchIndex:
     )
 
 
+def rebuild_wiki_sqlite_index(
+    api: ModuleType,
+    *,
+    db_path: Path | None = None,
+    wiki_root: Path | None = None,
+) -> dict[str, object]:
+    return sqlite_impl.rebuild_sqlite_index(api, db_path=db_path, wiki_root=wiki_root)
+
+
 def build_search_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Search local wiki pages with a lightweight TF-IDF index.")
+    parser = argparse.ArgumentParser(description="Search local wiki pages.")
     parser.add_argument("query", nargs="*", help="Search query.")
     parser.add_argument("--top-k", type=int, default=5, help="Number of ranked results to return.")
     parser.add_argument("--json", action="store_true", help="Emit JSON instead of human-readable output.")
     parser.add_argument("--write-index", type=Path, default=None, help="Write the generated index to this JSON file.")
     parser.add_argument("--read-index", type=Path, default=None, help="Search an existing JSON index instead of rebuilding.")
+    parser.add_argument("--db", type=Path, default=None, help="SQLite index path. Defaults to state/vault.db.")
     return parser
 
 
-def search_main(api: ModuleType, argv: list[str] | None = None) -> int:
-    args = build_search_parser().parse_args(argv)
-    query = " ".join(args.query).strip()
-    if not query:
-        raise SystemExit("query is required")
-    index = load_wiki_search_index(args.read_index) if args.read_index else build_wiki_search_index(api)
-    if args.write_index:
-        save_wiki_search_index(index, args.write_index)
-    results = search_wiki(api, query, top_k=args.top_k, index=index)
-    if args.json:
+def build_rebuild_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Rebuild the SQLite wiki search index.")
+    parser.add_argument("--db", type=Path, default=None, help="SQLite index path. Defaults to state/vault.db.")
+    parser.add_argument("--json", action="store_true", help="Emit JSON instead of human-readable output.")
+    return parser
+
+
+def _print_results(results: list[WikiSearchResult], *, as_json: bool) -> None:
+    if as_json:
         print(json.dumps([result.__dict__ for result in results], ensure_ascii=False, separators=(",", ":")))
-        return 0
+        return
     for index_number, result in enumerate(results, start=1):
         terms = ", ".join(result.matched_terms)
         print(f"{index_number}. {result.title} ({result.slug}) score={result.score:.3f}")
         if terms:
             print(f"   terms: {terms}")
+        if result.why:
+            print(f"   why: {result.why}")
         if result.snippet:
             print(f"   {result.snippet}")
+
+
+def search_main(api: ModuleType, argv: list[str] | None = None) -> int:
+    raw_args = list(argv or [])
+    if raw_args and raw_args[0] == "rebuild":
+        args = build_rebuild_parser().parse_args(raw_args[1:])
+        result = api.rebuild_wiki_sqlite_index(db_path=args.db)
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+        else:
+            print(f"Indexed {result['pages']} pages and {result['links']} links into {result['db_path']}")
+        return 0
+    if raw_args and raw_args[0] == "search":
+        raw_args = raw_args[1:]
+
+    args = build_search_parser().parse_args(raw_args)
+    query = " ".join(args.query).strip()
+    if not query:
+        raise SystemExit("query is required")
+    if args.read_index or args.write_index:
+        index = load_wiki_search_index(args.read_index) if args.read_index else build_wiki_search_index(api)
+        if args.write_index:
+            save_wiki_search_index(index, args.write_index)
+        results = search_wiki(api, query, top_k=args.top_k, index=index)
+    else:
+        results = search_wiki(api, query, top_k=args.top_k, db_path=args.db)
+    _print_results(results, as_json=args.json)
     return 0
 
 

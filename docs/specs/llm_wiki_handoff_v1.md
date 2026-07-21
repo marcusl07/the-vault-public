@@ -132,6 +132,16 @@ Code should remain authoritative for:
 - `wiki/log.md` is append-only historical trace.
 - `wiki/review.md` is the actionable backlog for contradictions and deferred work.
 
+### Future query scaling
+
+When `wiki/index.md` and `wiki/catalog.md` stop being sufficient for fast query routing, add a local retrieval layer that preserves the wiki-first architecture instead of replacing it with generic RAG:
+
+- Start with a local lexical index over page titles, slugs, aliases if added, headings, wikilinks, source citations, and bounded body snippets.
+- Seed graph-aware retrieval from those lexical matches, then run Personalized PageRank over the `[[wikilink]]` graph to surface nearby multi-hop context.
+- Use LLM keyword expansion only as a fallback when local lexical signals are weak; keep it bounded and rerun local search with the expanded terms.
+- Keep the flat atomic/topic page model. Do not adopt foldered `entities/`, `concepts/`, or `sources/` wiki structure merely to support retrieval.
+- The target query path is: local candidate search → graph expansion/ranking → read top wiki pages → answer from maintained wiki with source links.
+
 ### Logging shape
 
 - Keep log headings grep-friendly and stable, for example:
